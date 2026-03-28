@@ -15,32 +15,45 @@
   - 5 API routes: /api/config, /api/keys, /api/rules, /api/health, /api/stats
   - API key health testing for Gemini, HuggingFace, You.com, WordPress, YouTube
 - **Configuration Page (server-side):**
-  - Project Settings section (name, website, brand, industry, audience, region)
-  - Content Defaults section (tone, word count, FAQ count, toggles)
-  - WordPress Publishing section
-  - API Keys section with add/delete/test per provider (masked display, server-stored)
-  - Writing Rules section: banned phrases editor, AI replacements editor, table banned values, quality thresholds sliders
-  - Industry Presets section (9 presets: Education India, Technology, Healthcare, Finance, Real Estate, E-Commerce, Travel, Legal, Custom)
-- Removed old client-side tabs (SEO/AEO/GEO optimizer, old settings)
-- Reduced from 6 tabs to 4 pages: Dashboard, Content Generator, Content Library, Configuration
-- Updated CLAUDE.md with single-session strategy
+  - Project Settings, Content Defaults, WordPress Publishing sections
+  - API Keys with add/delete/test per provider (masked display, server-stored)
+  - Writing Rules: banned phrases (104), AI replacements (86), table banned values (30), quality thresholds
+  - Industry Presets (9 presets)
+- **FindMyCollege Defaults Prefilled:**
+  - 60+ config values loaded from .env.local
+  - 23 API keys (3 Gemini, 2 HF, 17 You.com, 1 image gen)
+  - 55 RSS news feeds (Direct Publisher, Google News, Regional, Banking)
+  - All writing rules, gov sites, competitor sites, trusted PDF domains
+- 4-page architecture: Dashboard, Content Generator, Content Library, Configuration
 
 ### Architecture
-- All state is server-side (SQLite)
+- All state server-side (SQLite), secrets in .env.local
 - Session via httpOnly cookies (auto-created, 30-day TTL)
-- Config, API keys, writing rules all persisted in DB per session
-- New sessions get seeded with default banned phrases (60+), AI replacements (35+), table banned values (28+), quality thresholds
+- New sessions seeded with complete FindMyCollege production config
 
 ### What is working
 - Config page fully functional (reads/writes server via API routes)
 - API key management with test-connection for each provider
 - Writing rules CRUD with pills/tag editors
+- All 23 API keys load from env and display correctly
 - Dashboard with stats from server
 - Dark/light theme toggle
 - Build passes with zero errors
 
-### Next Up
-- Content Generator page (single article: topic → classify → outline → write → preview)
-- SSE progress streaming for real-time generation feedback
-- Python bridge (subprocess calling content-generator pipeline)
-- Content Library page
+### Next Up — Phase 3: Content Generator Page
+The Content Generator page needs to show the FULL pipeline flow, not just a generate button.
+
+**Pipeline View (what user sees for each article):**
+1. Topic Input → Auto-classify (type + intent + confidence displayed)
+2. Research Panel (sources found, snippets, PDFs discovered, query count)
+3. Outline Editor (YAML sections with tiers, headings, formats — user can edit before writing)
+4. Section-by-Section Writing (each section shows progress, word count, table count)
+5. Post-Processing (banned phrases removed, quality score, hallucination check)
+6. Final Article View (HTML preview, outline sidebar, research data, quality report)
+
+**You.com Key Rotation** must be visible — show which key is active, which are in cooldown, health status per key.
+
+**Needs:**
+- SSE (Server-Sent Events) for real-time progress streaming
+- Python bridge (subprocess calling content-generator pipeline stages)
+- Article detail view showing all pipeline artifacts (research, outline, HTML, quality)
