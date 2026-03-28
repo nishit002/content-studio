@@ -1,26 +1,236 @@
 @import "tailwindcss";
 
+/* ── Theme Variables ── */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: #f8fafc;
+  --bg-secondary: #f1f5f9;
+  --card: #ffffff;
+  --card-hover: #f8fafc;
+  --sidebar: #ffffff;
+  --sidebar-hover: #f1f5f9;
+  --sidebar-active: #eff6ff;
+
+  --text: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+  --text-inverse: #ffffff;
+
+  --border: #e2e8f0;
+  --border-subtle: #f1f5f9;
+  --ring: #3b82f6;
+
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --accent-soft: #eff6ff;
+  --accent-muted: #dbeafe;
+
+  --success: #10b981;
+  --success-soft: #ecfdf5;
+  --warning: #f59e0b;
+  --warning-soft: #fffbeb;
+  --danger: #ef4444;
+  --danger-soft: #fef2f2;
+
+  --purple: #8b5cf6;
+  --purple-soft: #f5f3ff;
+  --teal: #14b8a6;
+  --teal-soft: #f0fdfa;
+  --orange: #f97316;
+  --orange-soft: #fff7ed;
+  --pink: #ec4899;
+  --pink-soft: #fdf2f8;
+
+  --gradient-start: #3b82f6;
+  --gradient-end: #8b5cf6;
+}
+
+.dark {
+  --bg: #0b1120;
+  --bg-secondary: #111827;
+  --card: #1e293b;
+  --card-hover: #263248;
+  --sidebar: #111827;
+  --sidebar-hover: #1e293b;
+  --sidebar-active: #1e3a5f;
+
+  --text: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --text-inverse: #0f172a;
+
+  --border: #1e293b;
+  --border-subtle: #1e293b;
+  --ring: #3b82f6;
+
+  --accent: #60a5fa;
+  --accent-hover: #3b82f6;
+  --accent-soft: #1e3a5f;
+  --accent-muted: #172554;
+
+  --success: #34d399;
+  --success-soft: #064e3b;
+  --warning: #fbbf24;
+  --warning-soft: #451a03;
+  --danger: #f87171;
+  --danger-soft: #450a0a;
+
+  --purple: #a78bfa;
+  --purple-soft: #2e1065;
+  --teal: #2dd4bf;
+  --teal-soft: #042f2e;
+  --orange: #fb923c;
+  --orange-soft: #431407;
+  --pink: #f472b6;
+  --pink-soft: #500724;
+
+  --gradient-start: #60a5fa;
+  --gradient-end: #a78bfa;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-background: var(--bg);
+  --color-foreground: var(--text);
+  --color-th-bg: var(--bg);
+  --color-th-bg-secondary: var(--bg-secondary);
+  --color-th-card: var(--card);
+  --color-th-card-hover: var(--card-hover);
+  --color-th-sidebar: var(--sidebar);
+  --color-th-sidebar-hover: var(--sidebar-hover);
+  --color-th-sidebar-active: var(--sidebar-active);
+  --color-th-text: var(--text);
+  --color-th-text-secondary: var(--text-secondary);
+  --color-th-text-muted: var(--text-muted);
+  --color-th-text-inverse: var(--text-inverse);
+  --color-th-border: var(--border);
+  --color-th-border-subtle: var(--border-subtle);
+  --color-th-ring: var(--ring);
+  --color-th-accent: var(--accent);
+  --color-th-accent-hover: var(--accent-hover);
+  --color-th-accent-soft: var(--accent-soft);
+  --color-th-accent-muted: var(--accent-muted);
+  --color-th-success: var(--success);
+  --color-th-success-soft: var(--success-soft);
+  --color-th-warning: var(--warning);
+  --color-th-warning-soft: var(--warning-soft);
+  --color-th-danger: var(--danger);
+  --color-th-danger-soft: var(--danger-soft);
+  --color-th-purple: var(--purple);
+  --color-th-purple-soft: var(--purple-soft);
+  --color-th-teal: var(--teal);
+  --color-th-teal-soft: var(--teal-soft);
+  --color-th-orange: var(--orange);
+  --color-th-orange-soft: var(--orange-soft);
+  --color-th-pink: var(--pink);
+  --color-th-pink-soft: var(--pink-soft);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+body {
+  background: var(--bg);
+  color: var(--text);
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--text-muted); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+
+/* ── Utility Classes ── */
+.cs-gradient-text {
+  background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.cs-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.cs-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-soft);
+}
+
+.cs-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: all 0.15s;
+  cursor: pointer;
+  border: none;
+}
+.cs-btn-primary {
+  background: var(--accent);
+  color: var(--text-inverse);
+}
+.cs-btn-primary:hover { background: var(--accent-hover); }
+.cs-btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.cs-btn-secondary {
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.cs-btn-secondary:hover { background: var(--card-hover); border-color: var(--accent); }
+
+.cs-btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);
+}
+.cs-btn-ghost:hover { background: var(--bg-secondary); color: var(--text); }
+
+.cs-input {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  color: var(--text);
+  font-size: 0.875rem;
+  transition: border-color 0.15s;
+  outline: none;
+}
+.cs-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.cs-input::placeholder { color: var(--text-muted); }
+
+.cs-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.125rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+/* ── Animations ── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fadeIn { animation: fadeIn 0.2s ease-out; }
+
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+.animate-pulse-subtle { animation: pulse-subtle 2s ease-in-out infinite; }
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.cs-shimmer {
+  background: linear-gradient(90deg, var(--border-subtle) 25%, var(--card-hover) 50%, var(--border-subtle) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
 }
