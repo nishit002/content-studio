@@ -46,13 +46,21 @@ export const contentTypeLabels: Record<ContentType, string> = {
 
 /* ── API Key Providers ── */
 export const apiProviders = [
-  { id: "gemini", name: "Google Gemini", description: "Classification, outlines, data extraction", required: true },
-  { id: "huggingface", name: "HuggingFace (Writer)", description: "Qwen3-235B for article writing", required: true },
-  { id: "you_search", name: "You.com Search", description: "Web research (multiple keys supported)", required: true },
-  { id: "wordpress", name: "WordPress", description: "Publishing (url|username|app_password)", required: false },
-  { id: "youtube", name: "YouTube API", description: "Media enrichment (optional)", required: false },
-  { id: "google_indexing", name: "Google Indexing", description: "Fast URL indexing (optional)", required: false },
-  { id: "image_gen", name: "Image Generation", description: "Featured images via FLUX.1 (optional)", required: false },
+  // Core pipeline (required for content generation)
+  { id: "gemini", name: "Google Gemini", description: "Classification, outlines, data extraction (multiple keys supported)", required: true },
+  { id: "huggingface", name: "HuggingFace (Writer)", description: "Qwen3-235B for article writing (multiple keys supported)", required: true },
+  { id: "you_search", name: "You.com Search", description: "Web research with key rotation (multiple keys supported)", required: true },
+  // Publishing
+  { id: "wordpress", name: "WordPress", description: "Publishing via REST API (url|username|app_password)", required: false },
+  { id: "supabase", name: "Supabase", description: "10courses database (url|service_role_key)", required: false },
+  // SEO & Keywords
+  { id: "google_ads", name: "Google Ads (Keyword Planner)", description: "Keyword volumes (dev_token|client_id|client_secret|refresh_token|customer_id)", required: false },
+  { id: "dataforseo", name: "DataForSEO", description: "SERP data & keyword research (login|password)", required: false },
+  { id: "serpapi", name: "SerpAPI", description: "Google People Also Ask questions (optional)", required: false },
+  // Media & Indexing
+  { id: "youtube", name: "YouTube API", description: "Video enrichment for news articles (optional)", required: false },
+  { id: "google_indexing", name: "Google Indexing", description: "Fast URL indexing via service account (optional)", required: false },
+  { id: "image_gen", name: "Image Generation", description: "Featured images via FLUX.1-schnell (optional)", required: false },
 ] as const;
 
 export type ApiProvider = (typeof apiProviders)[number]["id"];

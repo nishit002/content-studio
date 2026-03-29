@@ -50,7 +50,8 @@ function seedDefaults(sessionId: string) {
     brand_name: "FindMyCollege",
     industry: "education_india",
     target_audience: "Students, parents, and career aspirants in India",
-    default_region: "India",
+    default_country: "IN",
+    content_languages: "English,Hindi",
     default_tone: "Professional",
     current_year: "2026",
 
@@ -189,6 +190,50 @@ function seedDefaults(sessionId: string) {
   // Image generation
   const imageKey = process.env.IMAGE_API_KEY || "";
   if (imageKey) upsertApiKey(sessionId, "image_gen", imageKey, "FLUX.1-schnell");
+
+  // WordPress (combine url|username|password into single key entry)
+  const wpUrl = process.env.WP_SITE_URL || "";
+  const wpUser = process.env.WP_USERNAME || "";
+  const wpPass = process.env.WP_APP_PASSWORD || "";
+  if (wpUrl && wpUser && wpPass) {
+    upsertApiKey(sessionId, "wordpress", `${wpUrl}|${wpUser}|${wpPass}`, "FindMyCollege WordPress");
+  }
+
+  // Supabase (combine url|service_role_key)
+  const sbUrl = process.env.SUPABASE_URL || "";
+  const sbKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+  if (sbUrl && sbKey) {
+    upsertApiKey(sessionId, "supabase", `${sbUrl}|${sbKey}`, "10courses Database");
+  }
+
+  // Google Ads / Keyword Planner (combine all 5 fields)
+  const gadsDev = process.env.GADS_DEVELOPER_TOKEN || "";
+  const gadsClient = process.env.GADS_CLIENT_ID || "";
+  const gadsSecret = process.env.GADS_CLIENT_SECRET || "";
+  const gadsRefresh = process.env.GADS_REFRESH_TOKEN || "";
+  const gadsCustomer = process.env.GADS_LOGIN_CUSTOMER_ID || "";
+  if (gadsDev && gadsClient) {
+    upsertApiKey(sessionId, "google_ads", `${gadsDev}|${gadsClient}|${gadsSecret}|${gadsRefresh}|${gadsCustomer}`, "Keyword Planner");
+  }
+
+  // DataForSEO (combine login|password)
+  const dfsLogin = process.env.DATAFORSEO_LOGIN || "";
+  const dfsPass = process.env.DATAFORSEO_PASSWORD || "";
+  if (dfsLogin && dfsPass) {
+    upsertApiKey(sessionId, "dataforseo", `${dfsLogin}|${dfsPass}`, "SERP & Keywords");
+  }
+
+  // SerpAPI
+  const serpKey = process.env.SERPAPI_KEY || "";
+  if (serpKey) upsertApiKey(sessionId, "serpapi", serpKey, "People Also Ask");
+
+  // YouTube API
+  const youtubeKey = process.env.YOUTUBE_API_KEY || "";
+  if (youtubeKey) upsertApiKey(sessionId, "youtube", youtubeKey, "YouTube Data API");
+
+  // Google Indexing
+  const indexingKey = process.env.GOOGLE_INDEXING_KEY || "";
+  if (indexingKey) upsertApiKey(sessionId, "google_indexing", indexingKey, "Indexing API");
 
   /* ═══════════════════════════════════════════════════════════
    * 3. NEWS RSS FEEDS — all feeds from settings.yaml

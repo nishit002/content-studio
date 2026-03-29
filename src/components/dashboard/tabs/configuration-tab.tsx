@@ -144,6 +144,76 @@ export function ConfigurationTab() {
 }
 
 /* ═══════════════════════════════════════ */
+/* ── COUNTRY & LANGUAGE DATA ── */
+/* ═══════════════════════════════════════ */
+
+const countries = [
+  { code: "IN", name: "India" },
+  { code: "US", name: "United States" },
+  { code: "GB", name: "United Kingdom" },
+  { code: "CA", name: "Canada" },
+  { code: "AU", name: "Australia" },
+  { code: "AE", name: "UAE" },
+  { code: "SG", name: "Singapore" },
+  { code: "MY", name: "Malaysia" },
+  { code: "DE", name: "Germany" },
+  { code: "FR", name: "France" },
+  { code: "ES", name: "Spain" },
+  { code: "BR", name: "Brazil" },
+  { code: "MX", name: "Mexico" },
+  { code: "JP", name: "Japan" },
+  { code: "KR", name: "South Korea" },
+  { code: "ID", name: "Indonesia" },
+  { code: "SA", name: "Saudi Arabia" },
+  { code: "NG", name: "Nigeria" },
+  { code: "ZA", name: "South Africa" },
+  { code: "PH", name: "Philippines" },
+  { code: "BD", name: "Bangladesh" },
+  { code: "PK", name: "Pakistan" },
+  { code: "NP", name: "Nepal" },
+  { code: "LK", name: "Sri Lanka" },
+  { code: "GL", name: "Global" },
+];
+
+/** Country → available languages. `defaults` = pre-selected on choosing that country (English always included). */
+const countryLanguageMap: Record<string, { all: string[]; defaults: string[] }> = {
+  IN: {
+    all: ["English", "Hindi", "Tamil", "Telugu", "Kannada", "Malayalam", "Marathi", "Bengali", "Gujarati", "Punjabi", "Odia", "Urdu"],
+    defaults: ["English", "Hindi"],
+  },
+  US: { all: ["English", "Spanish"], defaults: ["English"] },
+  GB: { all: ["English"], defaults: ["English"] },
+  CA: { all: ["English", "French"], defaults: ["English"] },
+  AU: { all: ["English"], defaults: ["English"] },
+  AE: { all: ["English", "Arabic"], defaults: ["English", "Arabic"] },
+  SG: { all: ["English", "Mandarin", "Malay", "Tamil"], defaults: ["English"] },
+  MY: { all: ["English", "Malay", "Mandarin", "Tamil"], defaults: ["English", "Malay"] },
+  DE: { all: ["English", "German"], defaults: ["English", "German"] },
+  FR: { all: ["English", "French"], defaults: ["English", "French"] },
+  ES: { all: ["English", "Spanish"], defaults: ["English", "Spanish"] },
+  BR: { all: ["English", "Portuguese"], defaults: ["English", "Portuguese"] },
+  MX: { all: ["English", "Spanish"], defaults: ["English", "Spanish"] },
+  JP: { all: ["English", "Japanese"], defaults: ["English", "Japanese"] },
+  KR: { all: ["English", "Korean"], defaults: ["English", "Korean"] },
+  ID: { all: ["English", "Indonesian"], defaults: ["English", "Indonesian"] },
+  SA: { all: ["English", "Arabic"], defaults: ["English", "Arabic"] },
+  NG: { all: ["English", "Yoruba", "Hausa", "Igbo"], defaults: ["English"] },
+  ZA: { all: ["English", "Afrikaans", "Zulu", "Xhosa"], defaults: ["English"] },
+  PH: { all: ["English", "Filipino"], defaults: ["English", "Filipino"] },
+  BD: { all: ["English", "Bengali"], defaults: ["English", "Bengali"] },
+  PK: { all: ["English", "Urdu"], defaults: ["English", "Urdu"] },
+  NP: { all: ["English", "Nepali"], defaults: ["English", "Nepali"] },
+  LK: { all: ["English", "Sinhala", "Tamil"], defaults: ["English", "Sinhala"] },
+  GL: { all: ["English"], defaults: ["English"] },
+};
+
+function getLanguageOptions(countryCode: string): string[] {
+  const entry = countryLanguageMap[countryCode];
+  if (entry) return entry.all;
+  return ["English"];
+}
+
+/* ═══════════════════════════════════════ */
 /* ── PROJECT SETTINGS SECTION ── */
 /* ═══════════════════════════════════════ */
 
@@ -176,8 +246,71 @@ function ProjectSection({ config, onSave, saving }: { config: Record<string, str
             </select>
           </div>
           <Field label="Target Audience" value={local.target_audience} onChange={(v) => set("target_audience", v)} placeholder="e.g., Small business owners" />
-          <Field label="Default Region" value={local.default_region} onChange={(v) => set("default_region", v)} placeholder="e.g., India, US, Global" />
+          <div>
+            <label className="text-xs font-medium text-th-text-secondary block mb-1.5">Country</label>
+            <select
+              value={local.default_country || ""}
+              onChange={(e) => {
+                const country = e.target.value;
+                set("default_country", country);
+                // Auto-set default languages based on country
+                const countryLangs = countryLanguageMap[country];
+                if (countryLangs) {
+                  set("content_languages", countryLangs.defaults.join(","));
+                } else {
+                  set("content_languages", "English");
+                }
+              }}
+              className="cs-input"
+            >
+              <option value="">Select country...</option>
+              {countries.map((c) => (
+                <option key={c.code} value={c.code}>{c.name}</option>
+              ))}
+            </select>
+          </div>
         </div>
+
+        {/* Language selection — appears after country is chosen */}
+        {local.default_country && (
+          <div className="mt-4">
+            <label className="text-xs font-medium text-th-text-secondary block mb-2">
+              Content Languages
+              <span className="text-th-text-muted font-normal ml-1">(research & writing languages)</span>
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {getLanguageOptions(local.default_country).map((lang) => {
+                const selected = (local.content_languages || "English").split(",").map((l) => l.trim());
+                const isSelected = selected.includes(lang);
+                const isEnglish = lang === "English";
+                return (
+                  <button
+                    key={lang}
+                    onClick={() => {
+                      if (isEnglish) return; // English always included
+                      const current = selected.filter(Boolean);
+                      const updated = isSelected
+                        ? current.filter((l) => l !== lang)
+                        : [...current, lang];
+                      set("content_languages", updated.join(","));
+                    }}
+                    className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
+                      isSelected
+                        ? "bg-th-accent-soft text-th-accent ring-1 ring-th-accent/30"
+                        : "bg-th-bg-secondary text-th-text-muted hover:text-th-text"
+                    } ${isEnglish ? "opacity-80 cursor-default" : "cursor-pointer"}`}
+                  >
+                    {lang}
+                    {isEnglish && <span className="ml-1 text-th-text-muted">(always)</span>}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-xs text-th-text-muted mt-2">
+              Selected: {(local.content_languages || "English").split(",").filter(Boolean).join(", ")}
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="cs-card p-6">
@@ -238,48 +371,175 @@ function ProjectSection({ config, onSave, saving }: { config: Record<string, str
 /* ── API KEYS SECTION ── */
 /* ═══════════════════════════════════════ */
 
+/* ── Provider field definitions ── */
+const providerFields: Record<string, { name: string; placeholder: string; type?: string }[]> = {
+  gemini: [{ name: "API Key", placeholder: "AIzaSy..." }],
+  huggingface: [{ name: "API Key", placeholder: "hf_..." }],
+  you_search: [{ name: "API Key", placeholder: "Paste You.com API key" }],
+  wordpress: [
+    { name: "Site URL", placeholder: "https://articles.yoursite.com" },
+    { name: "Username", placeholder: "admin" },
+    { name: "App Password", placeholder: "xxxx xxxx xxxx xxxx", type: "password" },
+  ],
+  supabase: [
+    { name: "Project URL", placeholder: "https://xxxxx.supabase.co" },
+    { name: "Service Role Key", placeholder: "eyJhbGci...", type: "password" },
+  ],
+  google_ads: [
+    { name: "Developer Token", placeholder: "XXXXXXXXXXXXXXXX" },
+    { name: "Client ID", placeholder: "123456789.apps.googleusercontent.com" },
+    { name: "Client Secret", placeholder: "GOCSPX-...", type: "password" },
+    { name: "Refresh Token", placeholder: "1//0eXXXX...", type: "password" },
+    { name: "Login Customer ID", placeholder: "1234567890" },
+  ],
+  dataforseo: [
+    { name: "Login / Email", placeholder: "user@example.com" },
+    { name: "Password", placeholder: "API password", type: "password" },
+  ],
+  serpapi: [{ name: "API Key", placeholder: "Paste SerpAPI key" }],
+  youtube: [{ name: "API Key", placeholder: "AIzaSy..." }],
+  google_indexing: [{ name: "Service Account JSON", placeholder: "Paste full JSON or file path" }],
+  image_gen: [{ name: "API Key", placeholder: "hf_..." }],
+};
+
+/* ── Helpers to split/join pipe-delimited key values for multi-field providers ── */
+function splitKeyValue(providerId: string, combined: string): string[] {
+  const fields = providerFields[providerId] || [{ name: "Key", placeholder: "" }];
+  const parts = combined.split("|");
+  return fields.map((_, i) => parts[i] || "");
+}
+
+function formatKeyDisplay(providerId: string, combined: string): React.ReactNode {
+  const fields = providerFields[providerId] || [{ name: "Key", placeholder: "" }];
+  if (fields.length === 1) return <code className="text-xs text-th-text-secondary font-mono truncate">{combined}</code>;
+  const parts = combined.split("|");
+  return (
+    <div className="flex flex-wrap gap-x-4 gap-y-1 flex-1 min-w-0">
+      {fields.map((f, i) => (
+        <span key={i} className="text-xs text-th-text-secondary">
+          <span className="text-th-text-muted">{f.name}:</span>{" "}
+          <code className="font-mono">{f.type === "password" ? "••••" + (parts[i] || "").slice(-4) : (parts[i] || "—").length > 30 ? (parts[i] || "").slice(0, 20) + "..." + (parts[i] || "").slice(-6) : (parts[i] || "—")}</code>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function ApiKeysSection({ keys, onKeysChange }: { keys: ApiKeyEntry[]; onKeysChange: (k: ApiKeyEntry[]) => void }) {
   const [adding, setAdding] = useState<string | null>(null);
-  const [newKey, setNewKey] = useState("");
-  const [newLabel, setNewLabel] = useState("");
+  // editing stores "provider:index" to identify which key is being edited
+  const [editing, setEditing] = useState<string | null>(null);
+  const [formFields, setFormFields] = useState<Record<string, string>>({});
+  const [formLabel, setFormLabel] = useState("");
+  // original key_value before edit (needed to tell the API which key to replace)
+  const [editOriginalKey, setEditOriginalKey] = useState("");
   const [testing, setTesting] = useState<string | null>(null);
 
-  const addKey = async (provider: string) => {
-    if (!newKey.trim()) return;
-    await fetch("/api/keys", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider, key_value: newKey.trim(), label: newLabel.trim() }),
-    });
-    // Reload keys
-    const res = await fetch("/api/keys");
-    onKeysChange(await res.json());
-    setNewKey("");
-    setNewLabel("");
+  const resetForm = () => {
+    setFormFields({});
+    setFormLabel("");
     setAdding(null);
+    setEditing(null);
+    setEditOriginalKey("");
   };
 
-  const deleteKey = async (provider: string, keyValue: string) => {
+  const startAdding = (providerId: string) => {
+    if (adding === providerId) { resetForm(); return; }
+    resetForm();
+    setAdding(providerId);
+  };
+
+  const startEditing = async (providerId: string, index: number) => {
+    const editId = `${providerId}:${index}`;
+    if (editing === editId) { resetForm(); return; }
+    resetForm();
+
+    // Fetch raw (unmasked) keys to pre-fill the form
+    const res = await fetch("/api/keys?raw=true");
+    const rawKeys: ApiKeyEntry[] = await res.json();
+    const providerRawKeys = rawKeys.filter((k) => k.provider === providerId);
+    const keyData = providerRawKeys[index];
+    if (!keyData) return;
+
+    const fields = providerFields[providerId] || [{ name: "Key", placeholder: "" }];
+    const parts = keyData.key_value.split("|");
+    const prefilled: Record<string, string> = {};
+    fields.forEach((_, i) => { prefilled[i] = parts[i] || ""; });
+
+    setFormFields(prefilled);
+    setFormLabel(keyData.label || "");
+    setEditOriginalKey(keyData.key_value);
+    setEditing(editId);
+  };
+
+  const setField = (idx: number, value: string) => {
+    setFormFields((prev) => ({ ...prev, [idx]: value }));
+  };
+
+  const reloadKeys = async () => {
+    const res = await fetch("/api/keys");
+    onKeysChange(await res.json());
+  };
+
+  const saveKey = async (providerId: string) => {
+    const fields = providerFields[providerId] || [{ name: "Key", placeholder: "" }];
+    const values = fields.map((_, i) => (formFields[i] || "").trim());
+    if (!values[0]) return;
+    const combined = values.join("|");
+
+    if (editing && editOriginalKey) {
+      // Update existing key
+      await fetch("/api/keys", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: providerId, old_key_value: editOriginalKey, new_key_value: combined, label: formLabel.trim() }),
+      });
+    } else {
+      // Add new key
+      await fetch("/api/keys", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: providerId, key_value: combined, label: formLabel.trim() }),
+      });
+    }
+    await reloadKeys();
+    resetForm();
+  };
+
+  const deleteKey = async (provider: string, index: number) => {
+    // Need raw key to identify which one to delete
+    const res = await fetch("/api/keys?raw=true");
+    const rawKeys: ApiKeyEntry[] = await res.json();
+    const providerRawKeys = rawKeys.filter((k) => k.provider === provider);
+    const keyData = providerRawKeys[index];
+    if (!keyData) return;
+
     await fetch("/api/keys", {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider, key_value: keyValue }),
+      body: JSON.stringify({ provider, key_value: keyData.key_value }),
     });
-    const res = await fetch("/api/keys");
-    onKeysChange(await res.json());
+    await reloadKeys();
+    resetForm();
   };
 
-  const testKey = async (provider: string, keyValue: string) => {
-    setTesting(`${provider}:${keyValue}`);
+  const testKey = async (provider: string, index: number) => {
+    const testId = `${provider}:${index}`;
+    setTesting(testId);
     try {
+      // Need raw key for the health check
+      const res = await fetch("/api/keys?raw=true");
+      const rawKeys: ApiKeyEntry[] = await res.json();
+      const providerRawKeys = rawKeys.filter((k) => k.provider === provider);
+      const keyData = providerRawKeys[index];
+      if (!keyData) return;
+
       await fetch("/api/health", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider, key_value: keyValue }),
+        body: JSON.stringify({ provider, key_value: keyData.key_value }),
       });
-      // Reload to get updated status
-      const res = await fetch("/api/keys");
-      onKeysChange(await res.json());
+      await reloadKeys();
     } finally {
       setTesting(null);
     }
@@ -291,6 +551,59 @@ function ApiKeysSection({ keys, onKeysChange }: { keys: ApiKeyEntry[]; onKeysCha
     return "bg-th-text-muted";
   };
 
+  /** Renders the structured form fields for a provider (used for both add & edit) */
+  const renderForm = (providerId: string, isEdit: boolean) => {
+    const fields = providerFields[providerId] || [{ name: "Key", placeholder: "" }];
+    const isMultiField = fields.length > 1;
+
+    return (
+      <div className="mb-3 p-4 rounded-lg bg-th-bg-secondary space-y-3">
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-xs font-semibold text-th-text">{isEdit ? "Edit" : "Add"} {apiProviders.find((p) => p.id === providerId)?.name}</span>
+        </div>
+        {isMultiField ? (
+          <div className="grid grid-cols-2 gap-3">
+            {fields.map((f, i) => (
+              <div key={i} className={fields.length === 5 && i >= 4 ? "col-span-2" : ""}>
+                <label className="text-xs font-medium text-th-text-secondary block mb-1">{f.name}</label>
+                <input
+                  value={formFields[i] || ""}
+                  onChange={(e) => setField(i, e.target.value)}
+                  placeholder={f.placeholder}
+                  type={f.type || "text"}
+                  className="cs-input text-xs font-mono w-full"
+                />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div>
+            <label className="text-xs font-medium text-th-text-secondary block mb-1">{fields[0].name}</label>
+            <input
+              value={formFields[0] || ""}
+              onChange={(e) => setField(0, e.target.value)}
+              placeholder={fields[0].placeholder}
+              type={fields[0].type || "text"}
+              className="cs-input text-xs font-mono w-full"
+            />
+          </div>
+        )}
+        <div className="flex gap-2 items-center">
+          <input
+            value={formLabel}
+            onChange={(e) => setFormLabel(e.target.value)}
+            placeholder="Label (optional)"
+            className="cs-input w-40 text-xs"
+          />
+          <button onClick={() => saveKey(providerId)} className="cs-btn cs-btn-primary text-xs py-1.5 px-4">
+            {isEdit ? "Update" : "Save"}
+          </button>
+          <button onClick={resetForm} className="cs-btn cs-btn-ghost text-xs py-1.5 px-3">Cancel</button>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2 p-3 rounded-lg bg-th-warning-soft text-th-warning text-xs">
@@ -300,6 +613,7 @@ function ApiKeysSection({ keys, onKeysChange }: { keys: ApiKeyEntry[]; onKeysCha
 
       {apiProviders.map((provider) => {
         const providerKeys = keys.filter((k) => k.provider === provider.id);
+
         return (
           <div key={provider.id} className="cs-card p-5">
             <div className="flex items-center justify-between mb-3">
@@ -311,60 +625,58 @@ function ApiKeysSection({ keys, onKeysChange }: { keys: ApiKeyEntry[]; onKeysCha
                 <p className="text-xs text-th-text-muted">{provider.description}</p>
               </div>
               <button
-                onClick={() => setAdding(adding === provider.id ? null : provider.id)}
+                onClick={() => startAdding(provider.id)}
                 className="cs-btn cs-btn-secondary text-xs py-1.5 px-3"
               >
-                {adding === provider.id ? "Cancel" : "+ Add Key"}
+                + Add Key
               </button>
             </div>
 
-            {/* Add key form */}
-            {adding === provider.id && (
-              <div className="flex gap-2 mb-3 p-3 rounded-lg bg-th-bg-secondary">
-                <input
-                  value={newKey}
-                  onChange={(e) => setNewKey(e.target.value)}
-                  placeholder={provider.id === "wordpress" ? "url|username|app_password" : "Paste API key..."}
-                  className="cs-input flex-1 text-xs font-mono"
-                  type="password"
-                />
-                <input
-                  value={newLabel}
-                  onChange={(e) => setNewLabel(e.target.value)}
-                  placeholder="Label (optional)"
-                  className="cs-input w-32 text-xs"
-                />
-                <button onClick={() => addKey(provider.id)} className="cs-btn cs-btn-primary text-xs py-1.5">Save</button>
-              </div>
-            )}
+            {/* Add form */}
+            {adding === provider.id && renderForm(provider.id, false)}
 
             {/* Existing keys */}
-            {providerKeys.length === 0 ? (
+            {providerKeys.length === 0 && adding !== provider.id ? (
               <p className="text-xs text-th-text-muted italic">No keys configured</p>
             ) : (
               <div className="space-y-2">
-                {providerKeys.map((k, i) => (
-                  <div key={i} className="flex items-center gap-3 py-2 px-3 rounded-lg bg-th-bg-secondary">
-                    <div className={`w-2 h-2 rounded-full ${statusColor(k.status)}`} />
-                    <code className="text-xs text-th-text-secondary font-mono flex-1">{k.key_value}</code>
-                    {k.label && <span className="text-xs text-th-text-muted">{k.label}</span>}
-                    <span className="text-xs capitalize text-th-text-muted">{k.status}</span>
-                    <button
-                      onClick={() => testKey(k.provider, k.key_value)}
-                      disabled={testing === `${k.provider}:${k.key_value}`}
-                      className="cs-btn cs-btn-ghost text-xs py-1 px-2"
-                    >
-                      {testing === `${k.provider}:${k.key_value}` ? (
-                        <span className="w-3 h-3 rounded-full border border-th-accent border-t-transparent animate-spin inline-block" />
-                      ) : (
-                        "Test"
-                      )}
-                    </button>
-                    <button onClick={() => deleteKey(k.provider, k.key_value)} className="cs-btn cs-btn-ghost text-xs py-1 px-2 text-th-danger">
-                      Delete
-                    </button>
-                  </div>
-                ))}
+                {providerKeys.map((k, i) => {
+                  const editId = `${provider.id}:${i}`;
+                  const isEditing = editing === editId;
+
+                  if (isEditing) {
+                    return <div key={i}>{renderForm(provider.id, true)}</div>;
+                  }
+
+                  return (
+                    <div key={i} className="flex items-center gap-3 py-2.5 px-3 rounded-lg bg-th-bg-secondary">
+                      <div className={`w-2 h-2 rounded-full shrink-0 ${statusColor(k.status)}`} />
+                      {formatKeyDisplay(provider.id, k.key_value)}
+                      {k.label && <span className="text-xs text-th-text-muted shrink-0">{k.label}</span>}
+                      <span className="text-xs capitalize text-th-text-muted shrink-0">{k.status}</span>
+                      <button
+                        onClick={() => startEditing(provider.id, i)}
+                        className="cs-btn cs-btn-ghost text-xs py-1 px-2 shrink-0"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => testKey(provider.id, i)}
+                        disabled={testing === editId}
+                        className="cs-btn cs-btn-ghost text-xs py-1 px-2 shrink-0"
+                      >
+                        {testing === editId ? (
+                          <span className="w-3 h-3 rounded-full border border-th-accent border-t-transparent animate-spin inline-block" />
+                        ) : (
+                          "Test"
+                        )}
+                      </button>
+                      <button onClick={() => deleteKey(provider.id, i)} className="cs-btn cs-btn-ghost text-xs py-1 px-2 text-th-danger shrink-0">
+                        Delete
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>

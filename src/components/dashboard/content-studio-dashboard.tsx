@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { tabs, type TabKey } from "./types";
 import { ConfigurationTab } from "./tabs/configuration-tab";
+import { ContentGeneratorTab } from "./tabs/content-generator-tab";
 
 /* ── Icons ── */
 const icons: Record<TabKey, React.ReactNode> = {
@@ -77,7 +78,7 @@ export function ContentStudioDashboard() {
       case "Dashboard":
         return <DashboardPlaceholder stats={stats} onNavigate={setActiveTab} />;
       case "Content Generator":
-        return <PlaceholderTab name="Content Generator" description="Single article, bulk generation, and news pipeline will be here." />;
+        return <ContentGeneratorTab />;
       case "Content Library":
         return <PlaceholderTab name="Content Library" description="Browse and manage generated content will be here." />;
       case "Configuration":

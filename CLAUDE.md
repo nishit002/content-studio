@@ -30,16 +30,35 @@ I prefer to work in one continuous chat. To make this safe:
 - Frontend: Next.js 16, TypeScript, Tailwind v4
 - Backend: Python content-generator (at /Users/nishitkumar/Documents/gas-split/content-generator/)
 - AI: Gemini Flash, Qwen3-235B (HuggingFace), You.com Search
-- Storage: SQLite (server-side), cookies (session)
+- Storage: SQLite (server-side via better-sqlite3), cookies (session)
 - Deploy: Vercel
 - GitHub: nishit002/content-studio
 
 ## Architecture
 - ALL logic server-side (Next.js API routes)
-- Session via httpOnly cookies
-- Python pipeline called via subprocess from API routes
-- SSE (Server-Sent Events) for real-time generation progress
+- Session via httpOnly cookies (auto-created, 30-day TTL)
+- New sessions seeded with complete FindMyCollege production config from .env.local
+- Python pipeline will be called via subprocess from API routes (not built yet)
+- SSE (Server-Sent Events) for real-time generation progress (not built yet)
 - SQLite for config, content library, job tracking
+
+## Key files
+- `src/lib/server/db.ts` — SQLite schema, all DB helpers (config, keys, rules, content, stats)
+- `src/lib/server/session.ts` — Session middleware + seedDefaults() that loads all env vars
+- `src/lib/server/pipeline.ts` — Python subprocess bridge, spawns content-generator, parses stdout→SSE events
+- `src/app/api/keys/route.ts` — API key CRUD (GET masked, GET?raw=true unmasked, POST, PUT, DELETE)
+- `src/app/api/config/route.ts` — Config key-value store
+- `src/app/api/rules/route.ts` — Writing rules CRUD
+- `src/app/api/health/route.ts` — API key health testing
+- `src/app/api/stats/route.ts` — Dashboard stats
+- `src/app/api/generate/route.ts` — SSE endpoint for article generation (POST starts, GET polls job)
+- `src/app/api/article/route.ts` — Article artifacts (GET list/detail, PUT save edits)
+- `src/app/api/publish/route.ts` — Publish to WordPress (POST with title/content/slug)
+- `src/app/api/image/route.ts` — FLUX.1 image generation via HuggingFace
+- `src/components/dashboard/tabs/configuration-tab.tsx` — Config page (all sections)
+- `src/components/dashboard/tabs/content-generator-tab.tsx` — Content Generator: input, pipeline progress, article viewer/editor
+- `src/components/dashboard/types.ts` — Provider definitions, presets, content types
+- `src/components/dashboard/content-studio-dashboard.tsx` — Main dashboard layout + tabs
 
 ## Rules Claude must follow
 1. Never touch more than 3 files per task
@@ -49,6 +68,7 @@ I prefer to work in one continuous chat. To make this safe:
 5. Stop and ask if the task feels too large
 6. NEVER make things client-side — always server-side API routes
 7. Every feature needs session validation
+8. After /clear, ALWAYS read CLAUDE.md and PROGRESS.md before doing anything
 
 ## Pages to build (4 total)
 1. **Dashboard** — stats, recent activity, quick-start
@@ -57,16 +77,20 @@ I prefer to work in one continuous chat. To make this safe:
 4. **Configuration** — API keys, writing rules, presets, templates, news sources, publishing
 
 ## Current phase
-Phase 2 — Server foundation (session, DB, config API routes, config page)
+Phase 3 complete. Next: Phase 4 — Bulk Generation & News Pipeline
 
-## What is working
-- Project scaffolded with Next.js 16 + Tailwind v4
-- Theme system (dark/light mode with CSS variables)
-- GitHub repo created at nishit002/content-studio
-- Full codebase analysis of content-generator complete
+## API providers managed in UI (11 total)
+Core: Gemini, HuggingFace, You.com (required)
+Publishing: WordPress, Supabase
+SEO: Google Ads (Keyword Planner), DataForSEO, SerpAPI
+Media: YouTube, Google Indexing, Image Gen (FLUX.1)
 
-## What is broken or missing
-- No server-side foundation yet (session, DB, API routes)
-- No config page yet
-- No content generation flow yet
-- Old client-side tabs need to be replaced with server-side architecture
+Each provider has structured add/edit forms with proper labeled fields (not pipe-delimited text).
+Keys stored server-side in SQLite, masked in UI, raw values only fetched for edit mode.
+
+## Config values that matter
+- `default_country` — country code (IN, US, etc.)
+- `content_languages` — comma-separated languages for research & writing (e.g. "English,Hindi")
+- `wp_site_url`, `wp_username`, `wp_app_password` — WordPress publishing
+- `supabase_url`, `supabase_service_role_key` — Supabase publishing
+- All LLM settings (gemini_model, writer_model, temperatures, etc.)
