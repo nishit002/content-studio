@@ -169,6 +169,19 @@ function migrate(db: Database.Database) {
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
 
+    -- AEO / SRO audits
+    CREATE TABLE IF NOT EXISTS aeo_audits (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      audit_type TEXT NOT NULL DEFAULT 'aeo',
+      url TEXT NOT NULL,
+      keyword TEXT DEFAULT '',
+      score INTEGER DEFAULT 0,
+      result_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
     -- Indexes
     CREATE INDEX IF NOT EXISTS idx_content_session ON content(session_id);
     CREATE INDEX IF NOT EXISTS idx_content_status ON content(session_id, status);
@@ -179,6 +192,7 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_news_runs_session ON news_runs(session_id);
     CREATE INDEX IF NOT EXISTS idx_analytics_conn ON analytics_connections(session_id);
     CREATE INDEX IF NOT EXISTS idx_analytics_cache ON analytics_cache(session_id, provider);
+    CREATE INDEX IF NOT EXISTS idx_aeo_audits_session ON aeo_audits(session_id);
   `);
 }
 
@@ -442,4 +456,19 @@ export function getStats(sessionId: string) {
       country: !!countryRow?.value,
     },
   };
+}
+
+/* ── AEO / SRO Audit helpers ── */
+export function saveAudit(sessionId: string, id: string, auditType: "aeo" | "sro", url: string, keyword: string, score: number, result: unknown) {
+  const db = getDb();
+  db.prepare(
+    "INSERT OR REPLACE INTO aeo_audits (id, session_id, audit_type, url, keyword, score, result_json) VALUES (?, ?, ?, ?, ?, ?, ?)"
+  ).run(id, sessionId, auditType, url, keyword, score, JSON.stringify(result));
+}
+
+export function getAuditHistory(sessionId: string, limit = 20) {
+  const db = getDb();
+  return db
+    .prepare("SELECT id, audit_type, url, keyword, score, created_at FROM aeo_audits WHERE session_id = ? ORDER BY created_at DESC LIMIT ?")
+    .all(sessionId, limit) as { id: string; audit_type: string; url: string; keyword: string; score: number; created_at: string }[];
 }

@@ -3,6 +3,7 @@ export const tabs = [
   "Dashboard",
   "Content Generator",
   "Content Library",
+  "AEO & SRO",
   "Configuration",
 ] as const;
 

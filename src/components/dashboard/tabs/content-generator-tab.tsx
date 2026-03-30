@@ -104,7 +104,19 @@ interface BulkItem extends BulkRow {
   articlePath: string;
 }
 
-export function ContentGeneratorTab() {
+interface AeoSuggestions {
+  topic: string;
+  customOutline: string;
+  fromUrl: string;
+}
+
+export function ContentGeneratorTab({
+  aeoSuggestions,
+  onAeoSuggestionsConsumed,
+}: {
+  aeoSuggestions?: AeoSuggestions | null;
+  onAeoSuggestionsConsumed?: () => void;
+}) {
   const [mode, setMode] = useState<GenerateMode>("single");
   const [topic, setTopic] = useState("");
   const [subKeywords, setSubKeywords] = useState("");
@@ -112,6 +124,7 @@ export function ContentGeneratorTab() {
   const [articleType, setArticleType] = useState("");
   const [customOutline, setCustomOutline] = useState("");
   const [showCustomOutline, setShowCustomOutline] = useState(false);
+  const [aeoBanner, setAeoBanner] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [currentStage, setCurrentStage] = useState<Stage | null>(null);
   const [events, setEvents] = useState<ProgressEvent[]>([]);
@@ -148,6 +161,17 @@ export function ContentGeneratorTab() {
   }, []);
 
   useEffect(() => { loadArticles(); }, [loadArticles]);
+
+  // Pre-fill from AEO/SRO suggestions
+  useEffect(() => {
+    if (!aeoSuggestions) return;
+    setMode("single");
+    setTopic(aeoSuggestions.topic);
+    setCustomOutline(aeoSuggestions.customOutline);
+    setShowCustomOutline(true);
+    setAeoBanner(`Pre-filled from AEO audit of ${aeoSuggestions.fromUrl}`);
+    onAeoSuggestionsConsumed?.();
+  }, [aeoSuggestions, onAeoSuggestionsConsumed]);
 
   // View a specific article from the list
   const viewArticle = useCallback((slug: string) => {
@@ -1036,6 +1060,13 @@ export function ContentGeneratorTab() {
       {/* ── SINGLE MODE ── */}
       {mode === "single" && (
       <>
+      {/* ── AEO Pre-fill Banner ── */}
+      {aeoBanner && (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-400">
+          <span>⚡ {aeoBanner}</span>
+          <button onClick={() => setAeoBanner(null)} className="text-yellow-400/60 hover:text-yellow-400">✕</button>
+        </div>
+      )}
       {/* ── Topic Input Card ── */}
       <div className="cs-card p-6">
         <h3 className="text-sm font-semibold text-th-text mb-4">Generate Article</h3>
