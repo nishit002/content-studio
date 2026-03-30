@@ -1221,17 +1221,26 @@ function parseHtmlTable(tableHtml: string): { headers: string[]; rows: string[][
   return { headers, rows };
 }
 
-function generateBarChart(headers: string[], rows: string[][], tableIndex: number): string {
+function generateBarChart(headers: string[], rows: string[][], tableIndex: number, usedColTypes: Set<string>): string {
+  const COL_KEYWORDS: [string, string][] = [
+    ["salary", "salary"], ["package", "package"], ["lpa", "lpa"], ["ctc", "ctc"],
+    ["fee", "fee"], ["cost", "cost"],
+    ["rank", "rank"], ["nirf", "rank"], ["score", "score"], ["percentile", "score"],
+    ["seats", "seats"], ["intake", "seats"], ["count", "count"],
+  ];
   let numCol = -1;
+  let colType = "";
   const labelCol = 0;
-  for (let c = 1; c < headers.length; c++) {
-    const h = headers[c].toLowerCase();
-    if (h.includes("salary") || h.includes("fee") || h.includes("package") || h.includes("lpa") || h.includes("count") || h.includes("ctc") || h.includes("cost")) {
-      numCol = c;
-      break;
+  for (const [kw, type] of COL_KEYWORDS) {
+    for (let c = 1; c < headers.length; c++) {
+      if (headers[c].toLowerCase().includes(kw)) {
+        numCol = c; colType = type; break;
+      }
     }
+    if (numCol !== -1) break;
   }
-  if (numCol === -1) return "";
+  if (numCol === -1 || usedColTypes.has(colType)) return "";
+  usedColTypes.add(colType);
 
   const data: { label: string; value: number; raw: string }[] = [];
   for (const row of rows.slice(0, 10)) {
@@ -1274,6 +1283,36 @@ function generateBarChart(headers: string[], rows: string[][], tableIndex: numbe
   return svg;
 }
 
+function renderInsightCharts(html: string): string {
+  return html.replace(/<cs-chart>([\s\S]*?)<\/cs-chart>/gi, (_, jsonStr) => {
+    try {
+      const chart = JSON.parse(jsonStr.trim());
+      const items: { label: string; value: number; display: string }[] = (chart.items || []).slice(0, 12);
+      if (items.length < 2) return "";
+      const maxVal = Math.max(...items.map((d) => d.value));
+      if (maxVal === 0) return "";
+      const chartW = 700, barH = 28, gap = 6, labelW = 170, valueW = 160;
+      const chartH = items.length * (barH + gap) + 50;
+      let svg = `<div class="cs-chart" style="margin:2rem 0;padding:1.25rem;background:var(--bg-secondary);border-radius:0.75rem;border:1px solid var(--border)">`;
+      svg += `<p style="font-size:0.85rem;font-weight:700;color:var(--text);margin:0 0 0.25rem">${chart.title}</p>`;
+      if (chart.y_label) svg += `<p style="font-size:0.72rem;color:var(--text-secondary);margin:0 0 0.75rem">${chart.y_label}</p>`;
+      svg += `<svg viewBox="0 0 ${chartW} ${chartH}" style="width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">`;
+      items.forEach((d, i) => {
+        const y = i * (barH + gap) + 10;
+        const barW = Math.max(8, (d.value / maxVal) * (chartW - labelW - valueW - 20));
+        const color = CHART_COLORS[i % CHART_COLORS.length];
+        svg += `<text x="${labelW - 8}" y="${y + barH / 2 + 4}" text-anchor="end" font-size="11" fill="var(--text-secondary)" font-family="system-ui">${d.label}</text>`;
+        svg += `<rect x="${labelW}" y="${y}" width="${barW}" height="${barH}" rx="4" fill="${color}" opacity="0.85"/>`;
+        svg += `<text x="${labelW + barW + 8}" y="${y + barH / 2 + 4}" font-size="11" fill="var(--text)" font-weight="600" font-family="system-ui">${d.display ?? d.value}</text>`;
+      });
+      svg += `</svg></div>`;
+      return svg;
+    } catch {
+      return "";
+    }
+  });
+}
+
 function cleanArticleHtml(html: string): string {
   let cleaned = html
     .replace(/cellspacing="[^"]*"/gi, "")
@@ -1283,13 +1322,6 @@ function cleanArticleHtml(html: string): string {
     .replace(/<table[^>]*>/gi, "<table>")
     .replace(/<p>\s*,\s*/gi, "<p>");
 
-  let tableIndex = 0;
-  cleaned = cleaned.replace(/<table>[\s\S]*?<\/table>/gi, (match) => {
-    const { headers, rows } = parseHtmlTable(match);
-    const chart = generateBarChart(headers, rows, tableIndex);
-    tableIndex++;
-    return match + chart;
-  });
-
+  cleaned = renderInsightCharts(cleaned);
   return cleaned;
 }

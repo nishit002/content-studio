@@ -3,6 +3,80 @@
 ## Current State
 All 4 pages fully functional. Phases 2-7 complete. Dashboard rebuilt as performance analytics hub. Build passes with zero errors.
 
+## 2026-03-30 — Insight Charts from Researched Data
+
+### What was built
+- ✅ **`_generate_article_charts()` (writer.py)** — one Gemini call after article assembly. Uses research summary + article plain text to generate 1-2 charts that show something the tables DON'T already show (fee vs package ROI, ranking trend, score-to-seats ratio, etc.). Returns `<cs-chart>JSON</cs-chart>` blocks embedded in the article HTML.
+- ✅ **`renderInsightCharts()` (both frontend tabs)** — detects `<cs-chart>` blocks, parses the JSON, renders as SVG bar chart with title and y-label. Shows at bottom of article before disclaimer.
+- Charts are genuinely derived/cross-table insights — not repetitions of visible table data.
+
+### Files changed
+`writer.py`, `content-generator-tab.tsx`, `content-library-tab.tsx`
+
+---
+
+## 2026-03-30 — Smarter Dedup + Chart Deduplication
+
+### Repetition fix (writer.py)
+- ✅ **Data-value-based checker** — `_llm_check_sections` now finds repeated DATA VALUES (₹ amounts, rankings, percentages, seat counts) across sections rather than repeated sentences. Different sentences, same number = caught.
+- ✅ **Anchor-based patching** — replacement searches for the `<p>` containing the duplicate value string (not exact sentence match), so patches reliably land even when sentences differ
+- ✅ **Higher limits** — 20 patches max (up from 8), 28000 char budget (up from 18000), 6000 token response (up from 4000)
+
+### Chart fix (content-generator-tab.tsx + content-library-tab.tsx)
+- ✅ **One chart per data type** — `generateBarChart` now tracks which column types (fee, salary, rank, score, seats) already have a chart via a `usedColTypes` Set. Same column type in table 2, 3, 4 → no redundant chart
+- ✅ **More column types** — added rank/nirf, score/percentile, seats/intake to chart detection (previously only salary/fee/package)
+
+### Files changed
+`writer.py` (gas-split), `content-generator-tab.tsx`, `content-library-tab.tsx`
+
+---
+
+## 2026-03-30 — Global Banned Facts Brain (writer.py)
+
+### What was built
+- ✅ **`_extract_global_banned_facts()`** — ONE Gemini call fires before any section writes. Reads the research summary and extracts the 10-12 "structural overview facts" specific to this topic — the facts so fundamental that every parallel section writer would independently want to state them as background context. Returns a JSON list of short fact-phrases.
+- ✅ **Injected into outline dict** — `outline["_global_banned_facts"]` threads to every section via the existing outline parameter with zero signature changes.
+- ✅ **Hard ban in every prompt** — `_build_section_prompt` reads the list and injects a `GLOBALLY BANNED FACTS` block into EVERY section's prompt (intro + all body). Each fact gets a ✗ marker. Section writers must check every paragraph against the list before writing.
+- This is the "brain" — shared knowledge extracted once, enforced in all 12 parallel section writers simultaneously.
+
+### Three-layer defense now in place
+1. **Global banned facts** (before writing) — topic-specific structural facts extracted from research, banned everywhere
+2. **Full repeat ban prompt** (during writing) — every paragraph checked against intro + global ban list
+3. **LLM checker** (after writing) — catches anything that slipped through, rewrites with unique content
+
+### File changed
+`src/writer.py` (Python, gas-split repo)
+
+---
+
+## 2026-03-30 — Full Repeat Ban + LLM Checker Agent (writer.py)
+
+### Problem diagnosed
+CUET article: "13 languages, 23 domain subjects", "NCERT Class 12 curriculum", "language test, domain-specific subject exams", "50 questions, 250 marks, 60 minutes" all repeated verbatim across 5-6 sections. Old fix only banned the FIRST sentence opener — repetition was happening in 2nd and 3rd paragraphs too.
+
+### Two-layer fix
+1. **Prompt: Full repeat ban** (`_build_section_prompt` intro_block) — BANNED IN EVERY PARAGRAPH (not just opener): structural overview facts, count stats, structure summaries, basis statements, exam mode, marking scheme. Rule: every paragraph must contain at least one fact not in the intro.
+2. **LLM Checker** (`_llm_check_sections`) — post-processing pass after all sections finish. One Gemini call scans all prose, finds repeated facts, returns JSON patches, rewrites (not deletes) duplicate paragraphs with unique content. Fully silent, zero extra UI.
+
+### File changed
+`src/writer.py` (Python, gas-split repo)
+
+---
+
+## 2026-03-30 — LLM Checker Agent (writer.py)
+
+### What was built
+- ✅ **`_llm_check_sections()`** — Silent post-processing pass added to `ArticleWriter`. After all sections finish writing in parallel, ONE Gemini call scans all prose paragraphs across sections, identifies repeated facts/stats/sentences, and returns surgical patches (JSON) to REWRITE (not delete) the duplicate paragraphs with unique content. Applied before final assembly. User sees zero latency indicator — it runs transparently in the pipeline.
+- How it works: strips prose from each section → labels by heading → sends to Gemini at temp=0.1 → parses patch JSON → applies replacements surgically to the `<p>` tags → logs how many were fixed
+- Tables and lists are never touched
+- If Gemini returns no patches (no duplicates found), no changes applied
+- If JSON parse fails, original sections preserved (safe fallback)
+
+### File changed
+`src/writer.py` (Python, gas-split repo)
+
+---
+
 ## 2026-03-30 — Tab switching no longer kills generation
 
 - ✅ **Generation survives tab switches** — `content-studio-dashboard.tsx` was unmounting inactive tabs (conditional `renderTab()`). All 4 tabs now render simultaneously; inactive tabs are hidden with `hidden` CSS class. SSE connection, progress state, and job tracking stay alive when switching tabs.

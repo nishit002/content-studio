@@ -85,12 +85,10 @@ I prefer to work in one continuous chat. To make this safe:
 Phase 7 complete. All 4 pages fully functional. Dashboard rebuilt with performance analytics. Default tab: Dashboard.
 
 ## Active issues (2026-03-30)
-- Python pipeline path was wrong — fixed to `/Volumes/NISHIT_PD/gas new/gas-split/content-generator`
-- Python binary was wrong — fixed to `/usr/bin/python3` via `PYTHON_BIN` constant in pipeline.ts
-- Sub-keywords stuck: `write --topic` in main.py ignores `SUB_KEYWORDS` env var (hardcodes `""`) — fix: read env var
-- Cover image too generic — FLUX.1 prompt needs topic/type context
-- Content quality: intro lines repeated in body, needs stronger prompt anti-repetition rules
-- Planned: article type selector + custom outline input in Content Generator UI
+All known issues resolved. Pipeline is stable.
+
+## Context window note
+When context is getting large, tell Nishit: "Context filling — run /clear then re-read CLAUDE.md + PROGRESS.md"
 
 ## API routes (18 total)
 - `GET/POST /api/config` — config key-value store
