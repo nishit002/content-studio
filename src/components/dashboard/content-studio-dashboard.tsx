@@ -4,6 +4,8 @@ import { useState, useEffect, useCallback } from "react";
 import { tabs, type TabKey } from "./types";
 import { ConfigurationTab } from "./tabs/configuration-tab";
 import { ContentGeneratorTab } from "./tabs/content-generator-tab";
+import ContentLibraryTab from "./tabs/content-library-tab";
+import DashboardTab from "./tabs/dashboard-tab";
 
 /* ── Icons ── */
 const icons: Record<TabKey, React.ReactNode> = {
@@ -38,7 +40,7 @@ const tabDescriptions: Record<TabKey, string> = {
 };
 
 export function ContentStudioDashboard() {
-  const [activeTab, setActiveTab] = useState<TabKey>("Configuration");
+  const [activeTab, setActiveTab] = useState<TabKey>("Dashboard");
   const [collapsed, setCollapsed] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [mounted, setMounted] = useState(false);
@@ -71,19 +73,6 @@ export function ContentStudioDashboard() {
         </div>
       </div>
     );
-  }
-
-  function renderTab() {
-    switch (activeTab) {
-      case "Dashboard":
-        return <DashboardPlaceholder stats={stats} onNavigate={setActiveTab} />;
-      case "Content Generator":
-        return <ContentGeneratorTab />;
-      case "Content Library":
-        return <PlaceholderTab name="Content Library" description="Browse and manage generated content will be here." />;
-      case "Configuration":
-        return <ConfigurationTab />;
-    }
   }
 
   return (
@@ -165,8 +154,19 @@ export function ContentStudioDashboard() {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-6 animate-fadeIn">
-          {renderTab()}
+        {/* All tabs stay mounted — only the active one is visible.
+            This keeps generation state/SSE alive when switching tabs. */}
+        <div className={`flex-1 overflow-y-auto p-6 ${activeTab === "Dashboard" ? "" : "hidden"}`}>
+          <DashboardTab onNavigate={setActiveTab} />
+        </div>
+        <div className={`flex-1 overflow-y-auto p-6 ${activeTab === "Content Generator" ? "" : "hidden"}`}>
+          <ContentGeneratorTab />
+        </div>
+        <div className={`flex-1 overflow-y-auto p-6 ${activeTab === "Content Library" ? "" : "hidden"}`}>
+          <ContentLibraryTab />
+        </div>
+        <div className={`flex-1 overflow-y-auto p-6 ${activeTab === "Configuration" ? "" : "hidden"}`}>
+          <ConfigurationTab />
         </div>
       </main>
     </div>

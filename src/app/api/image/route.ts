@@ -35,8 +35,8 @@ export async function POST(req: NextRequest) {
   // Enhance prompt based on type
   const isCover = type === "cover";
   const enhancedPrompt = isCover
-    ? `Professional blog cover image, clean modern design, minimalist: ${prompt}. No text, no watermark.`
-    : `Clean informational illustration for article section: ${prompt}. Professional, minimal, no text overlay.`;
+    ? `Wide editorial cover photo for an Indian education article about: ${prompt}. Photo-realistic. University campus, students, modern architecture, or relevant subject matter. Bright natural lighting, sharp focus, no text overlay, no watermark, no logos. Shot like a premium magazine cover. 16:9 aspect ratio.`
+    : `Clean informational illustration for article section about: ${prompt}. Professional, minimal, no text overlay.`;
 
   try {
     const res = await fetch(

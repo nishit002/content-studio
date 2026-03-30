@@ -115,11 +115,70 @@ function migrate(db: Database.Database) {
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
 
+    -- Discovered news items
+    CREATE TABLE IF NOT EXISTS news_items (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      url TEXT NOT NULL,
+      source TEXT DEFAULT '',
+      tags TEXT DEFAULT '',
+      published TEXT DEFAULT '',
+      status TEXT DEFAULT 'discovered',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (session_id, url),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    -- News discovery runs
+    CREATE TABLE IF NOT EXISTS news_runs (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      status TEXT DEFAULT 'running',
+      items_found INTEGER DEFAULT 0,
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at TEXT,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    -- Analytics connections (GA4, GSC, Bing)
+    CREATE TABLE IF NOT EXISTS analytics_connections (
+      session_id TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      access_token TEXT NOT NULL DEFAULT '',
+      refresh_token TEXT NOT NULL DEFAULT '',
+      token_expires_at TEXT NOT NULL DEFAULT '',
+      property_id TEXT NOT NULL DEFAULT '',
+      property_name TEXT NOT NULL DEFAULT '',
+      email TEXT NOT NULL DEFAULT '',
+      connected_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (session_id, provider),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    -- Analytics data cache
+    CREATE TABLE IF NOT EXISTS analytics_cache (
+      session_id TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      metric_type TEXT NOT NULL,
+      date_range TEXT NOT NULL,
+      data_json TEXT NOT NULL DEFAULT '{}',
+      fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (session_id, provider, metric_type, date_range),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
     -- Indexes
     CREATE INDEX IF NOT EXISTS idx_content_session ON content(session_id);
     CREATE INDEX IF NOT EXISTS idx_content_status ON content(session_id, status);
     CREATE INDEX IF NOT EXISTS idx_jobs_session ON jobs(session_id);
     CREATE INDEX IF NOT EXISTS idx_api_keys_session ON api_keys(session_id);
+    CREATE INDEX IF NOT EXISTS idx_news_items_session ON news_items(session_id);
+    CREATE INDEX IF NOT EXISTS idx_news_items_url ON news_items(session_id, url);
+    CREATE INDEX IF NOT EXISTS idx_news_runs_session ON news_runs(session_id);
+    CREATE INDEX IF NOT EXISTS idx_analytics_conn ON analytics_connections(session_id);
+    CREATE INDEX IF NOT EXISTS idx_analytics_cache ON analytics_cache(session_id, provider);
   `);
 }
 
@@ -263,6 +322,86 @@ export function deleteNewsSource(id: string) {
   db.prepare("DELETE FROM news_sources WHERE id = ?").run(id);
 }
 
+/* ── Analytics connection helpers ── */
+export interface AnalyticsConnection {
+  provider: string;
+  access_token: string;
+  refresh_token: string;
+  token_expires_at: string;
+  property_id: string;
+  property_name: string;
+  email: string;
+  connected_at: string;
+  updated_at: string;
+}
+
+export function getAnalyticsConnection(sessionId: string, provider: string): AnalyticsConnection | null {
+  const db = getDb();
+  return (db.prepare(
+    "SELECT provider, access_token, refresh_token, token_expires_at, property_id, property_name, email, connected_at, updated_at FROM analytics_connections WHERE session_id = ? AND provider = ?"
+  ).get(sessionId, provider) as AnalyticsConnection | undefined) ?? null;
+}
+
+export function getAllAnalyticsConnections(sessionId: string): AnalyticsConnection[] {
+  const db = getDb();
+  return db.prepare(
+    "SELECT provider, access_token, refresh_token, token_expires_at, property_id, property_name, email, connected_at, updated_at FROM analytics_connections WHERE session_id = ? ORDER BY provider"
+  ).all(sessionId) as AnalyticsConnection[];
+}
+
+export function upsertAnalyticsConnection(
+  sessionId: string,
+  provider: string,
+  data: { access_token: string; refresh_token: string; token_expires_at: string; email?: string }
+) {
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO analytics_connections (session_id, provider, access_token, refresh_token, token_expires_at, email, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+     ON CONFLICT (session_id, provider) DO UPDATE SET
+       access_token = excluded.access_token,
+       refresh_token = CASE WHEN excluded.refresh_token = '' THEN analytics_connections.refresh_token ELSE excluded.refresh_token END,
+       token_expires_at = excluded.token_expires_at,
+       email = CASE WHEN excluded.email = '' THEN analytics_connections.email ELSE excluded.email END,
+       updated_at = excluded.updated_at`
+  ).run(sessionId, provider, data.access_token, data.refresh_token, data.token_expires_at, data.email ?? "");
+}
+
+export function setAnalyticsProperty(sessionId: string, provider: string, propertyId: string, propertyName: string) {
+  const db = getDb();
+  db.prepare(
+    "UPDATE analytics_connections SET property_id = ?, property_name = ?, updated_at = datetime('now') WHERE session_id = ? AND provider = ?"
+  ).run(propertyId, propertyName, sessionId, provider);
+}
+
+export function deleteAnalyticsConnection(sessionId: string, provider: string) {
+  const db = getDb();
+  db.prepare("DELETE FROM analytics_connections WHERE session_id = ? AND provider = ?").run(sessionId, provider);
+  db.prepare("DELETE FROM analytics_cache WHERE session_id = ? AND provider = ?").run(sessionId, provider);
+}
+
+export function getAnalyticsCache(sessionId: string, provider: string, metricType: string, dateRange: string) {
+  const db = getDb();
+  const row = db.prepare(
+    "SELECT data_json, fetched_at FROM analytics_cache WHERE session_id = ? AND provider = ? AND metric_type = ? AND date_range = ?"
+  ).get(sessionId, provider, metricType, dateRange) as { data_json: string; fetched_at: string } | undefined;
+  if (!row) return null;
+  // Cache valid for 1 hour
+  const age = Date.now() - new Date(row.fetched_at + "Z").getTime();
+  if (age > 3600000) return null;
+  try { return JSON.parse(row.data_json); } catch { return null; }
+}
+
+export function setAnalyticsCache(sessionId: string, provider: string, metricType: string, dateRange: string, data: unknown) {
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO analytics_cache (session_id, provider, metric_type, date_range, data_json, fetched_at)
+     VALUES (?, ?, ?, ?, ?, datetime('now'))
+     ON CONFLICT (session_id, provider, metric_type, date_range) DO UPDATE SET
+       data_json = excluded.data_json, fetched_at = excluded.fetched_at`
+  ).run(sessionId, provider, metricType, dateRange, JSON.stringify(data));
+}
+
 /* ── Stats ── */
 export function getStats(sessionId: string) {
   const db = getDb();
@@ -280,9 +419,27 @@ export function getStats(sessionId: string) {
     .prepare("SELECT AVG(quality_score) as avg FROM content WHERE session_id = ? AND quality_score > 0")
     .get(sessionId) as { avg: number | null };
 
+  // Check which required API key providers are configured
+  const configuredProviders = db
+    .prepare("SELECT DISTINCT provider FROM api_keys WHERE session_id = ?")
+    .all(sessionId) as { provider: string }[];
+  const providerSet = new Set(configuredProviders.map((p) => p.provider));
+
+  // Check if country/language are set
+  const countryRow = db
+    .prepare("SELECT value FROM config WHERE session_id = ? AND key = 'default_country'")
+    .get(sessionId) as { value: string } | undefined;
+
   return {
     total: total.count,
     byStatus: Object.fromEntries(stats.map((s) => [s.status, s.count])),
     avgQuality: avgQuality.avg ? Math.round(avgQuality.avg) : 0,
+    setup: {
+      gemini: providerSet.has("gemini"),
+      huggingface: providerSet.has("huggingface"),
+      you_search: providerSet.has("you_search"),
+      wordpress: providerSet.has("wordpress"),
+      country: !!countryRow?.value,
+    },
   };
 }

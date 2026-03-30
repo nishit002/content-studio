@@ -24,6 +24,10 @@
 .DS_Store
 *.pem
 
+# macOS resource forks
+._*
+._.git
+
 # debug
 npm-debug.log*
 yarn-debug.log*

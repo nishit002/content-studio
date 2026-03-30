@@ -5,7 +5,7 @@ import path from "path";
 import yaml from "js-yaml"; // may not be available — handle gracefully
 
 const PIPELINE_DIR = process.env.PIPELINE_DIR
-  || path.resolve("/Users/nishitkumar/Documents/gas-split/content-generator");
+  || path.resolve("/Volumes/NISHIT_PD/gas new/gas-split/content-generator");
 const OUTPUT_DIR = path.join(PIPELINE_DIR, "output");
 
 /**
@@ -163,6 +163,37 @@ export async function PUT(req: NextRequest) {
   // Save to article.html
   const htmlPath = path.join(articleDir, "article.html");
   fs.writeFileSync(htmlPath, html, "utf-8");
+
+  return new Response(JSON.stringify({ ok: true, slug: safeSlug }), {
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+/**
+ * DELETE /api/article?slug=some-article — Remove article folder from disk.
+ */
+export async function DELETE(req: NextRequest) {
+  await getSession();
+  const slug = req.nextUrl.searchParams.get("slug");
+
+  if (!slug) {
+    return new Response(JSON.stringify({ error: "slug is required" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const safeSlug = slug.replace(/[^a-z0-9-]/gi, "");
+  const articleDir = path.join(OUTPUT_DIR, safeSlug);
+
+  if (!fs.existsSync(articleDir)) {
+    return new Response(JSON.stringify({ error: "Article not found" }), {
+      status: 404,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  fs.rmSync(articleDir, { recursive: true, force: true });
 
   return new Response(JSON.stringify({ ok: true, slug: safeSlug }), {
     headers: { "Content-Type": "application/json" },
