@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import { v4 as uuidv4 } from "uuid";
 import { getSession } from "@/lib/server/session";
 import { getDb } from "@/lib/server/db";
-import { runPipeline, runNewsPipeline, type PipelineEvent } from "@/lib/server/pipeline";
+import { runPipeline, runNewsPipeline, runAtlasPipeline, type PipelineEvent } from "@/lib/server/pipeline";
 
 // Allow up to 5 minutes for article generation (default is 60s on Vercel)
 export const maxDuration = 300;
@@ -16,13 +16,14 @@ export const maxDuration = 300;
 export async function POST(req: NextRequest) {
   const sessionId = await getSession();
   const body = await req.json();
-  const { topic, subKeywords, region, type: articleType, competitorUrl, customOutline } = body as {
+  const { topic, subKeywords, region, type: articleType, competitorUrl, customOutline, pipeline: pipelineChoice } = body as {
     topic?: string;
     subKeywords?: string;
     region?: string;
     type?: string;
     competitorUrl?: string;
     customOutline?: string;
+    pipeline?: string;
   };
 
   if (!topic?.trim()) {
@@ -38,11 +39,13 @@ export async function POST(req: NextRequest) {
   const contentId = uuidv4();
 
   const isNews = articleType === "news";
+  const isAtlas = pipelineChoice === "atlas";
+  const jobType = isNews ? "news" : isAtlas ? "atlas" : "single";
 
   db.prepare(
     `INSERT INTO jobs (id, session_id, job_type, status, total_items, config_json, started_at, created_at)
      VALUES (?, ?, ?, 'running', 1, ?, datetime('now'), datetime('now'))`
-  ).run(jobId, sessionId, isNews ? "news" : "single", JSON.stringify({ topic, subKeywords, region, type: articleType, competitorUrl }));
+  ).run(jobId, sessionId, jobType, JSON.stringify({ topic, subKeywords, region, type: articleType, competitorUrl, pipeline: pipelineChoice }));
 
   db.prepare(
     `INSERT INTO content (id, session_id, topic, content_type, status, created_at, updated_at)
@@ -72,6 +75,8 @@ export async function POST(req: NextRequest) {
       try {
         const pipeline = isNews
           ? runNewsPipeline(sessionId, topic.trim(), { competitorUrl, tags: subKeywords })
+          : isAtlas
+          ? runAtlasPipeline(sessionId, topic.trim(), { contentType: articleType, force: false })
           : runPipeline(sessionId, topic.trim(), { subKeywords, region, articleType, customOutline });
 
         for await (const event of pipeline) {

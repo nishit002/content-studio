@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { composeCoverImage } from "@/lib/client/cover-image";
 
 /* ── Types ── */
 interface ArticleListItem {
@@ -16,6 +17,7 @@ interface ArticleListItem {
   generation_time: number;
   generated_at: string;
   has_html: boolean;
+  source?: string; // "atlas" | undefined (undefined = CG)
 }
 
 interface ArticleMeta {
@@ -91,7 +93,7 @@ const GRADE_BG: Record<string, string> = {
 };
 
 /* ── Main Component ── */
-export default function ContentLibraryTab() {
+export default function ContentLibraryTab({ refreshKey = 0 }: { refreshKey?: number }) {
   const [articles, setArticles] = useState<ArticleListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
@@ -121,7 +123,7 @@ export default function ContentLibraryTab() {
     finally { setLoading(false); }
   }, []);
 
-  useEffect(() => { fetchArticles(); }, [fetchArticles]);
+  useEffect(() => { fetchArticles(); }, [fetchArticles, refreshKey]);
 
   // View article detail
   const viewArticle = async (slug: string) => {
@@ -172,7 +174,7 @@ export default function ContentLibraryTab() {
   // Filter
   const q = query.toLowerCase();
   const filtered = articles.filter((a) => {
-    if (activeType && a.content_type !== activeType) return false;
+    if (activeType && (a.content_type || "other") !== activeType) return false;
     if (gradeFilter && a.quality_grade !== gradeFilter) return false;
     if (q) {
       const haystack = `${a.title} ${a.topic} ${a.slug} ${a.content_type}`.toLowerCase();
@@ -460,11 +462,16 @@ export default function ContentLibraryTab() {
                   </svg>
                 </button>
 
-                {/* Type badge + grade */}
+                {/* Type badge + ATLAS badge + grade */}
                 <div className="flex items-center justify-between mb-3">
-                  <span className="cs-badge bg-th-bg-secondary text-th-text-secondary text-[10px]">
-                    {TYPE_LABELS[a.content_type] || a.content_type.replace("_", " ")}
-                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="cs-badge bg-th-bg-secondary text-th-text-secondary text-[10px]">
+                      {TYPE_LABELS[a.content_type] || a.content_type.replace("_", " ")}
+                    </span>
+                    {a.source === "atlas" && (
+                      <span className="cs-badge bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 text-[10px] font-semibold">✦ ATLAS</span>
+                    )}
+                  </div>
                   {a.quality_grade && (
                     <span className={`w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold ${GRADE_BG[a.quality_grade] || "bg-th-bg-secondary text-th-text-muted"}`}>
                       {a.quality_grade}
@@ -561,9 +568,14 @@ export default function ContentLibraryTab() {
                       <p className="truncate" title={a.title || a.topic}>{a.title || a.topic}</p>
                     </td>
                     <td className="py-3 px-3">
-                      <span className="cs-badge bg-th-bg-secondary text-th-text-secondary text-[10px]">
-                        {TYPE_LABELS[a.content_type] || a.content_type.replace("_", " ")}
-                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="cs-badge bg-th-bg-secondary text-th-text-secondary text-[10px]">
+                          {TYPE_LABELS[a.content_type] || a.content_type.replace("_", " ")}
+                        </span>
+                        {a.source === "atlas" && (
+                          <span className="cs-badge bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 text-[10px] font-semibold">✦ ATLAS</span>
+                        )}
+                      </div>
                     </td>
                     <td className="py-3 px-3 text-right text-th-text-secondary">{a.word_count.toLocaleString()}</td>
                     <td className="py-3 px-3 text-right text-th-text-secondary">{a.table_count}</td>
@@ -642,6 +654,44 @@ function formatDate(dateStr: string): string {
   } catch { return dateStr; }
 }
 
+/* ── Parse HTML into sections by h2/h3 ── */
+function parseSections(html: string): { heading: string; tag: string; sectionHtml: string }[] {
+  const sections: { heading: string; tag: string; sectionHtml: string }[] = [];
+  const regex = /<(h[23])([^>]*)>([\s\S]*?)<\/h[23]>([\s\S]*?)(?=<h[23][\s>]|$)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(html)) !== null) {
+    const tag = match[1];
+    const attrs = match[2];
+    const headingInner = match[3];
+    const body = match[4].trim();
+    const headingText = headingInner.replace(/<[^>]+>/g, "").trim();
+    if (!headingText) continue;
+    const fullHtml = `<${tag}${attrs}>${headingInner}</${tag}>\n${body}`;
+    sections.push({ heading: headingText, tag, sectionHtml: fullHtml });
+  }
+  return sections;
+}
+
+/* ── Build smart rewrite instructions from quality report ── */
+function buildSmartRewriteInstructions(quality: ArticleMeta["quality"]): string {
+  if (!quality) return "";
+  const fixes: string[] = [];
+  if (quality.data_density < 2.5)
+    fixes.push(`boost data density (currently ${quality.data_density.toFixed(1)}/100w — add specific stats, fees, ranks, percentages)`);
+  if (!quality.has_faq)
+    fixes.push("add a FAQ section answering the 5 most common reader questions about this topic");
+  if (quality.table_count < 3)
+    fixes.push(`add more comparison or data tables (currently ${quality.table_count} — target at least 4)`);
+  if (quality.fact_check_rate < 80)
+    fixes.push(`improve factual accuracy (currently ${Math.round(quality.fact_check_rate)}% verified — back every number with a named source)`);
+  if (quality.readability === "Poor" || quality.readability === "Very Poor")
+    fixes.push("improve readability — shorter sentences, clearer section openings, avoid jargon");
+  if (quality.quality_issues?.length)
+    quality.quality_issues.slice(0, 3).forEach(i => fixes.push(i.toLowerCase()));
+  if (fixes.length === 0) return "";
+  return `Target Grade A (score 90+). Fix these specific issues:\n- ${fixes.join("\n- ")}`;
+}
+
 /* ── Article Preview + Rich Editor + Publish ── */
 function ArticlePreview({ html, meta, slug }: { html: string | null; meta: ArticleMeta | null; slug?: string }) {
   const [editing, setEditing] = useState(false);
@@ -656,11 +706,175 @@ function ArticlePreview({ html, meta, slug }: { html: string | null; meta: Artic
   const [publishing, setPublishing] = useState(false);
   const [publishResult, setPublishResult] = useState<{ ok?: boolean; post_url?: string; edit_url?: string; error?: string } | null>(null);
   const [publishStatus, setPublishStatus] = useState<"draft" | "publish">("draft");
+  const [showDownloadMenu, setShowDownloadMenu] = useState(false);
+
+  // ── Rewrite panel state ──
+  const [showRewrite, setShowRewrite] = useState(false);
+  const [analyzeResult, setAnalyzeResult] = useState<{ titleIssue: { issue: string; suggested: string } | null; sections: { heading: string; issue: string }[] } | null>(null);
+  const [sectionInstructions, setSectionInstructions] = useState<Record<number, string>>({});
+  const [titleInstruction, setTitleInstruction] = useState("");
+  const [globalInstruction, setGlobalInstruction] = useState("Improve accuracy and depth. Replace vague prose with specific facts, numbers, and named sources.");
+  const [analyzing, setAnalyzing] = useState(false);
+  const [rewriteProgress, setRewriteProgress] = useState<{ current: number; total: number; sectionName: string } | null>(null);
+  const [rewriteDone, setRewriteDone] = useState(false);
+  const [rewriteError, setRewriteError] = useState("");
+  const [liveTitle, setLiveTitle] = useState(meta?.title || "");
+
   const editorRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { setEditedHtml(html || ""); }, [html]);
 
   if (!html) return <p className="text-sm text-th-text-muted">No article HTML available.</p>;
+
+  const sections = parseSections(editedHtml || html || "");
+
+  // ── Client-side generic title detection (fallback when LLM misses it) ──
+  const GENERIC_TITLE_PATTERNS = [
+    /overview,?\s*key highlights/i, /key highlights.*why it matters/i,
+    /why it matters/i, /complete guide/i, /everything you need to know/i,
+    /key facts.*why/i, /overview.*key facts/i, /what it is.*key facts/i,
+    /types.*categories.*explained/i, /: overview$/i,
+  ];
+  const detectGenericTitle = (title: string): string => {
+    if (!title) return "";
+    const tl = title.toLowerCase();
+    if (GENERIC_TITLE_PATTERNS.some(p => p.test(tl))) {
+      return `Replace with a specific title containing concrete data (rank, fees, or key stat from the article). Current title is too generic.`;
+    }
+    return "";
+  };
+
+  // ── Run analysis — populates per-section issue cards ──
+  const runAnalyze = async () => {
+    if (!meta || analyzing) return;
+    setAnalyzing(true);
+    setAnalyzeResult(null);
+    setRewriteError("");
+    try {
+      const ar = await fetch("/api/article/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          html: editedHtml || html || "",
+          topic: meta.topic,
+          contentType: meta.content_type,
+          qualityScore: meta.quality?.overall_score ?? 0,
+          currentTitle: liveTitle || meta.title,
+        }),
+      });
+      if (ar.ok) {
+        const ad = await ar.json() as { titleIssue?: { issue: string; suggested: string } | null; sections?: { heading: string; issue: string }[]; error?: string };
+        if (!ad.error) {
+          setAnalyzeResult({ titleIssue: ad.titleIssue ?? null, sections: ad.sections ?? [] });
+          // Pre-fill title instruction: use LLM suggestion, or fall back to client-side detection
+          const suggested = ad.titleIssue?.suggested || detectGenericTitle(liveTitle || meta.title);
+          if (suggested) setTitleInstruction(suggested);
+          // Pre-fill section instructions by matching headings
+          const prefilled: Record<number, string> = {};
+          sections.forEach((sec, idx) => {
+            const secLow = sec.heading.toLowerCase();
+            const match = (ad.sections ?? []).find(s => {
+              const sLow = s.heading.toLowerCase();
+              return secLow.includes(sLow.slice(0, 15)) || sLow.includes(secLow.slice(0, 15));
+            });
+            if (match) prefilled[idx] = match.issue;
+          });
+          setSectionInstructions(prefilled);
+        }
+      }
+    } catch { setRewriteError("Analysis failed — check connection and try again."); }
+    finally { setAnalyzing(false); }
+  };
+
+  // ── Run section-by-section rewrite using /api/rewrite ──
+  const runSectionRewrites = async () => {
+    if (!meta) return;
+    // Use per-section instruction if set, else fall back to global instruction
+    const fallback = globalInstruction.trim();
+    const toFix = sections
+      .map((section, idx) => ({ section, idx, instruction: sectionInstructions[idx]?.trim() || fallback }))
+      .filter(({ instruction }) => instruction.length > 0);
+
+    if (toFix.length === 0 && !titleInstruction.trim()) {
+      setRewriteError("Add at least one instruction before starting the rewrite.");
+      return;
+    }
+
+    setRewriteError("");
+    setRewriteDone(false);
+    const totalSteps = toFix.length + (titleInstruction.trim() ? 1 : 0);
+    setRewriteProgress({ current: 0, total: totalSteps, sectionName: "Starting…" });
+
+    let currentHtml = editedHtml || html || "";
+
+    // Update title first if instruction provided — also patch H1 in HTML
+    if (titleInstruction.trim()) {
+      const newTitle = titleInstruction.trim();
+      setLiveTitle(newTitle);
+      if (slug) await saveTitle(newTitle);
+      // Replace <h1>...</h1> in the article HTML so the preview updates too
+      currentHtml = currentHtml.replace(/<h1[^>]*>[\s\S]*?<\/h1>/i, `<h1>${newTitle}</h1>`);
+      setRewriteProgress({ current: 1, total: totalSteps, sectionName: "Title updated" });
+    }
+
+    const titleOffset = titleInstruction.trim() ? 1 : 0;
+    for (let i = 0; i < toFix.length; i++) {
+      const { section, instruction } = toFix[i];
+      setRewriteProgress({ current: titleOffset + i + 1, total: totalSteps, sectionName: section.heading });
+      try {
+        const res = await fetch("/api/rewrite", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sectionHeading: section.heading,
+            sectionHtml: section.sectionHtml,
+            instruction,
+            topicContext: meta.topic,
+            qualityIssues: meta.quality?.quality_issues,
+            slug,
+          }),
+        });
+        const data = await res.json() as { html?: string; error?: string };
+        if (res.ok && data.html) {
+          currentHtml = currentHtml.replace(section.sectionHtml, data.html);
+        }
+      } catch { /* continue with remaining sections */ }
+    }
+
+    // Save final article
+    setEditedHtml(currentHtml);
+    if (slug) {
+      await fetch("/api/article", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug, html: currentHtml }),
+      });
+    }
+    setRewriteProgress(null);
+    setRewriteDone(true);
+  };
+
+  const downloadArticle = (format: "html" | "word" | "pdf") => {
+    const title = meta?.title || slug || "article";
+    const safeTitle = title.replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "-").toLowerCase().slice(0, 60);
+    const content = editedHtml || html || "";
+    const baseStyle = "body{font-family:Georgia,serif;max-width:820px;margin:40px auto;padding:0 24px;line-height:1.7;color:#1a1a1a}h1,h2,h3{color:#111;margin-top:1.5em}table{border-collapse:collapse;width:100%;margin:1em 0}td,th{border:1px solid #ccc;padding:8px 10px;text-align:left}th{background:#f5f5f5;font-weight:600}img{max-width:100%}";
+    if (format === "html") {
+      const out = `<!DOCTYPE html>\n<html lang="en">\n<head><meta charset="UTF-8"><title>${title}</title><style>${baseStyle}</style></head>\n<body>${content}</body>\n</html>`;
+      const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(new Blob([out], { type: "text/html" })), download: `${safeTitle}.html` });
+      a.click(); URL.revokeObjectURL(a.href);
+    } else if (format === "word") {
+      const out = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="UTF-8"><title>${title}</title><style>body{font-family:Calibri,sans-serif;font-size:11pt;line-height:1.6}h1{font-size:18pt}h2{font-size:14pt}h3{font-size:12pt}table{border-collapse:collapse;width:100%}td,th{border:1px solid #999;padding:5px 8px}th{background:#f0f0f0}</style></head><body>${content}</body></html>`;
+      const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(new Blob(["\ufeff" + out], { type: "application/msword" })), download: `${safeTitle}.doc` });
+      a.click(); URL.revokeObjectURL(a.href);
+    } else if (format === "pdf") {
+      const win = window.open("", "_blank");
+      if (!win) return;
+      win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${title}</title><style>${baseStyle}@media print{body{max-width:none;margin:0;padding:24px}}</style></head><body>${content}<script>window.onload=function(){window.print();}<\/script></body></html>`);
+      win.document.close();
+    }
+    setShowDownloadMenu(false);
+  };
 
   const syncFromEditor = () => {
     if (editorRef.current) setEditedHtml(editorRef.current.innerHTML);
@@ -719,9 +933,11 @@ function ArticlePreview({ html, meta, slug }: { html: string | null; meta: Artic
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: meta.title, type: "cover" }),
       });
-      const data = await res.json();
-      if (data.url) setCoverImageUrl(data.url);
-      else alert(data.error || "Failed to generate image");
+      const data = await res.json() as { url?: string; error?: string };
+      if (!data.url) { alert(data.error || "Failed to generate image"); return; }
+      // Compose: background image + title text overlay → JPEG data URL
+      const composed = await composeCoverImage(data.url, meta.title);
+      setCoverImageUrl(composed);
     } catch (e) { alert((e as Error).message); }
     finally { setGeneratingCover(false); }
   };
@@ -748,21 +964,215 @@ function ArticlePreview({ html, meta, slug }: { html: string | null; meta: Artic
     syncFromEditor();
   };
 
+  const saveTitle = async (newTitle: string) => {
+    if (!slug || !newTitle.trim() || newTitle === (meta?.title || "")) return;
+    try {
+      await fetch("/api/article", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ slug, title: newTitle.trim() }) });
+    } catch { /* non-blocking */ }
+  };
+
   const q = meta?.quality;
 
   return (
     <div className="space-y-5">
       {/* Header */}
       {meta && (
-        <div className="pb-4 border-b border-th-border">
-          <h3 className="text-lg font-semibold text-th-text">{meta.title}</h3>
-          <div className="flex items-center gap-3 mt-2 text-xs text-th-text-muted flex-wrap">
-            <span className="cs-badge bg-th-accent-soft text-th-accent">{meta.content_type.replace("_", " ")}</span>
-            <span>{meta.word_count.toLocaleString()} words</span>
-            <span>{meta.table_count} tables</span>
-            <span>{meta.section_count} sections</span>
-            {meta.generation_time > 0 && <span>{Math.round(meta.generation_time)}s</span>}
+        <div className="pb-4 border-b border-th-border flex items-start justify-between gap-4">
+          <div className="min-w-0 flex-1">
+            <input
+              type="text"
+              value={liveTitle || meta.title}
+              onChange={(e) => setLiveTitle(e.target.value)}
+              onBlur={(e) => saveTitle(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.currentTarget.blur(); } }}
+              className="w-full text-lg font-semibold text-th-text bg-transparent border-b border-transparent hover:border-th-border focus:border-th-accent focus:outline-none pb-0.5 transition-colors"
+              title="Click to edit article title"
+            />
+            <div className="flex items-center gap-3 mt-2 text-xs text-th-text-muted flex-wrap">
+              <span className="cs-badge bg-th-accent-soft text-th-accent">{meta.content_type.replace("_", " ")}</span>
+              <span>{meta.word_count.toLocaleString()} words</span>
+              <span>{meta.table_count} tables</span>
+              <span>{meta.section_count} sections</span>
+              {meta.generation_time > 0 && <span>{Math.round(meta.generation_time)}s</span>}
+            </div>
           </div>
+          {/* Rewrite + Download buttons */}
+          <div className="flex items-center gap-2 flex-shrink-0">
+          {/* Rewrite button */}
+          <button
+            onClick={() => {
+              setShowRewrite((v) => !v);
+              setRewriteError("");
+              setRewriteDone(false);
+            }}
+            className={`cs-btn text-xs flex items-center gap-1.5 ${meta?.quality?.overall_grade === "D" ? "cs-btn-primary" : "cs-btn-secondary"}`}
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" />
+            </svg>
+            {meta?.quality?.overall_grade === "D" ? "Rewrite (Grade D)" : "Rewrite"}
+          </button>
+          {/* Download dropdown */}
+          <div className="relative">
+            <button
+              onClick={() => setShowDownloadMenu((v) => !v)}
+              className="cs-btn cs-btn-secondary text-xs flex items-center gap-1.5"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+              </svg>
+              Download
+              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+              </svg>
+            </button>
+            {showDownloadMenu && (
+              <div className="absolute right-0 top-full mt-1 z-20 bg-th-card border border-th-border rounded-lg shadow-lg py-1 w-40">
+                {([["html", "HTML File"], ["word", "Word (.doc)"], ["pdf", "PDF (Print)"]] as [Parameters<typeof downloadArticle>[0], string][]).map(([fmt, label]) => (
+                  <button key={fmt} onClick={() => downloadArticle(fmt)} className="w-full text-left px-3 py-2 text-xs hover:bg-th-card-hover text-th-text transition-colors">
+                    {label}
+                  </button>
+                ))}
+                <div className="border-t border-th-border my-1" />
+                <button
+                  onClick={() => { setShowDownloadMenu(false); const a = document.createElement("a"); a.href = `/api/article?slug=${slug}&part=sources`; a.download = `${slug}-sources.txt`; document.body.appendChild(a); a.click(); document.body.removeChild(a); }}
+                  className="w-full text-left px-3 py-2 text-xs hover:bg-th-card-hover text-th-text transition-colors"
+                >
+                  Sources (.txt)
+                </button>
+              </div>
+            )}
+          </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Rewrite Panel ── */}
+      {showRewrite && (
+        <div className="p-4 rounded-lg border border-th-border bg-th-bg-secondary space-y-4">
+          <div className="flex items-center justify-between">
+            <h4 className="text-sm font-semibold text-th-text">Rewrite Article</h4>
+            <button onClick={() => { setShowRewrite(false); setAnalyzeResult(null); setRewriteDone(false); setRewriteError(""); }} className="text-xs text-th-text-muted hover:text-th-text">✕ Close</button>
+          </div>
+
+          {/* Step 1: Analyse button */}
+          {!analyzeResult && !analyzing && !rewriteProgress && !rewriteDone && (
+            <button onClick={runAnalyze} className="cs-btn cs-btn-secondary text-xs w-full flex items-center justify-center gap-2">
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23-.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5" /></svg>
+              Analyse Article
+            </button>
+          )}
+
+          {/* Analysing spinner */}
+          {analyzing && (
+            <div className="flex items-center gap-2 text-sm text-th-accent">
+              <span className="w-4 h-4 rounded-full border-2 border-th-accent border-t-transparent animate-spin shrink-0" />
+              Analysing article sections…
+            </div>
+          )}
+
+          {/* Step 2: Section cards after analysis */}
+          {analyzeResult && !rewriteProgress && !rewriteDone && (
+            <div className="space-y-3">
+              {/* Title card */}
+              <div className="rounded-lg border border-th-border bg-th-card p-3 space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-th-border text-th-text-muted">H1</span>
+                  <span className="text-sm font-medium text-th-text">Article Title</span>
+                </div>
+                {analyzeResult.titleIssue && (
+                  <p className="text-[11px] text-th-warning bg-th-warning/10 rounded px-2 py-1.5">⚠ {analyzeResult.titleIssue.issue}</p>
+                )}
+                <input
+                  type="text"
+                  value={titleInstruction}
+                  onChange={(e) => setTitleInstruction(e.target.value)}
+                  placeholder="Type the new title here, or leave blank to keep current…"
+                  className="cs-input w-full text-sm"
+                />
+              </div>
+
+              {/* Global instruction — applies to all sections without a specific instruction */}
+              <div className="rounded-lg border border-th-accent/30 bg-th-accent-soft p-3 space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-th-accent/40 text-th-accent">ALL</span>
+                  <span className="text-sm font-medium text-th-text">Apply to all sections</span>
+                  <span className="text-[11px] text-th-text-muted ml-auto">sections without their own instruction use this</span>
+                </div>
+                <textarea
+                  value={globalInstruction}
+                  onChange={(e) => setGlobalInstruction(e.target.value)}
+                  rows={2}
+                  className="cs-input w-full text-sm resize-none"
+                />
+              </div>
+
+              {/* Section cards */}
+              {sections.map((section, idx) => {
+                const detected = analyzeResult.sections.find(s => {
+                  const sLow = s.heading.toLowerCase();
+                  const secLow = section.heading.toLowerCase();
+                  return secLow.includes(sLow.slice(0, 15)) || sLow.includes(secLow.slice(0, 15));
+                });
+                return (
+                  <div key={idx} className="rounded-lg border border-th-border bg-th-card p-3 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-th-border text-th-text-muted">{section.tag.toUpperCase()}</span>
+                      <span className="text-sm font-medium text-th-text truncate">{section.heading}</span>
+                    </div>
+                    {detected && (
+                      <p className="text-[11px] text-th-warning bg-th-warning/10 rounded px-2 py-1.5">⚠ {detected.issue}</p>
+                    )}
+                    <textarea
+                      value={sectionInstructions[idx] || ""}
+                      onChange={(e) => setSectionInstructions(prev => ({ ...prev, [idx]: e.target.value }))}
+                      placeholder={`Override for this section only, or leave blank to use the global instruction…`}
+                      rows={2}
+                      className="cs-input w-full text-sm resize-none"
+                    />
+                  </div>
+                );
+              })}
+
+              {/* Action buttons */}
+              <div className="flex gap-2 pt-1">
+                <button onClick={runSectionRewrites} className="cs-btn cs-btn-primary text-xs flex-1">
+                  Start Rewrite
+                </button>
+                <button onClick={runAnalyze} className="cs-btn cs-btn-secondary text-xs">
+                  Re-analyse
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Progress bar */}
+          {rewriteProgress && (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 text-sm text-th-accent">
+                <span className="w-4 h-4 rounded-full border-2 border-th-accent border-t-transparent animate-spin shrink-0" />
+                <span className="truncate">Rewriting: {rewriteProgress.sectionName}</span>
+              </div>
+              <div className="w-full h-1.5 rounded-full bg-th-border overflow-hidden">
+                <div className="h-full bg-th-accent transition-all duration-300" style={{ width: `${(rewriteProgress.current / rewriteProgress.total) * 100}%` }} />
+              </div>
+              <p className="text-xs text-th-text-muted">{rewriteProgress.current} of {rewriteProgress.total} steps</p>
+            </div>
+          )}
+
+          {rewriteError && <p className="text-sm text-th-danger">{rewriteError}</p>}
+
+          {rewriteDone && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 p-3 rounded-lg bg-th-success-soft">
+                <svg className="w-4 h-4 text-th-success shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                <span className="text-sm text-th-success font-medium">Rewrite complete! Article saved.</span>
+              </div>
+              <button onClick={() => { setRewriteDone(false); setAnalyzeResult(null); setSectionInstructions({}); setTitleInstruction(""); setGlobalInstruction("Improve accuracy and depth. Replace vague prose with specific facts, numbers, and named sources."); setRewriteError(""); }} className="cs-btn cs-btn-secondary text-xs w-full">
+                Analyse Again
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -902,6 +1312,7 @@ function ArticlePreview({ html, meta, slug }: { html: string | null; meta: Artic
           />
         )}
       </div>
+
 
       {/* Publish bar */}
       <div className="flex items-center gap-3 p-4 rounded-lg border border-th-border bg-th-bg-secondary">
@@ -1315,6 +1726,7 @@ function renderInsightCharts(html: string): string {
 
 function cleanArticleHtml(html: string): string {
   let cleaned = html
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
     .replace(/cellspacing="[^"]*"/gi, "")
     .replace(/cellpadding="[^"]*"/gi, "")
     .replace(/border="[^"]*"/gi, "")

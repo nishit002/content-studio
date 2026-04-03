@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
+import { composeCoverImage } from "@/lib/client/cover-image";
 
 /* ── Pipeline stage config ── */
 const STAGES = [
@@ -77,6 +78,7 @@ interface ArticleListItem {
   generation_time: number;
   generated_at: string;
   has_html: boolean;
+  source?: string;
 }
 
 type ResultTab = "preview" | "quality" | "sections" | "outline";
@@ -110,14 +112,29 @@ interface AeoSuggestions {
   fromUrl: string;
 }
 
+interface PastRun {
+  id: string;
+  name: string;
+  status: string;
+  total: number;
+  done: number;
+  failed: number;
+  total_words: number;
+  started_at: string;
+  completed_at: string | null;
+}
+
 export function ContentGeneratorTab({
   aeoSuggestions,
   onAeoSuggestionsConsumed,
+  onArticleGenerated,
 }: {
   aeoSuggestions?: AeoSuggestions | null;
   onAeoSuggestionsConsumed?: () => void;
+  onArticleGenerated?: () => void;
 }) {
   const [mode, setMode] = useState<GenerateMode>("single");
+  const [pipeline, setPipeline] = useState<"cg" | "atlas">("cg");
   const [topic, setTopic] = useState("");
   const [subKeywords, setSubKeywords] = useState("");
   const [region, setRegion] = useState("India");
@@ -147,6 +164,13 @@ export function ContentGeneratorTab({
   const [bulkCurrentIndex, setBulkCurrentIndex] = useState(-1);
   const [bulkUploading, setBulkUploading] = useState(false);
   const [bulkGeneratingKw, setBulkGeneratingKw] = useState<number | "all" | null>(null);
+  const [bulkRunName, setBulkRunName] = useState("");
+  const [bulkRunId, setBulkRunId] = useState<string | null>(null);
+  const [pastRuns, setPastRuns] = useState<PastRun[]>([]);
+  const [pastRunsLoading, setPastRunsLoading] = useState(false);
+  const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
+  const [expandedRunItems, setExpandedRunItems] = useState<BulkItem[]>([]);
+  const [expandedRunLoading, setExpandedRunLoading] = useState(false);
   const bulkAbortRef = useRef<AbortController | null>(null);
   const bulkTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -161,6 +185,17 @@ export function ContentGeneratorTab({
   }, []);
 
   useEffect(() => { loadArticles(); }, [loadArticles]);
+
+  const loadPastRuns = useCallback(() => {
+    setPastRunsLoading(true);
+    fetch("/api/bulk?runs=true")
+      .then((r) => r.json())
+      .then((d: { runs?: PastRun[] }) => setPastRuns(d.runs || []))
+      .catch(() => {})
+      .finally(() => setPastRunsLoading(false));
+  }, []);
+
+  useEffect(() => { if (mode === "bulk") loadPastRuns(); }, [mode, loadPastRuns]);
 
   // Pre-fill from AEO/SRO suggestions
   useEffect(() => {
@@ -207,7 +242,7 @@ export function ContentGeneratorTab({
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic: topic.trim(), subKeywords, region, articleType: articleType || undefined, customOutline: customOutline.trim() || undefined }),
+        body: JSON.stringify({ topic: topic.trim(), subKeywords, region, articleType: articleType || undefined, customOutline: customOutline.trim() || undefined, pipeline }),
         signal: controller.signal,
       });
 
@@ -238,7 +273,14 @@ export function ContentGeneratorTab({
             setCurrentStage(event.stage);
 
             if (event.stage === "done" && event.detail) {
-              setResult(event.detail);
+              setResult((prev) => ({ ...(prev ?? {}), ...event.detail }));
+              onArticleGenerated?.();
+              // For ATLAS: load article when slug is emitted
+              const atlasSlug = event.detail?.atlasSlug as string | undefined;
+              if (atlasSlug) {
+                loadArticles();
+                viewArticle(atlasSlug);
+              }
             }
             if (event.stage === "error") {
               setError(event.message);
@@ -327,9 +369,27 @@ export function ContentGeneratorTab({
   }, [bulkRows]);
 
   // ── Bulk generation ──
-  const startBulkGeneration = useCallback(async () => {
-    const validRows = bulkRows.filter((r) => r.topic.trim());
+  const startBulkGeneration = useCallback(async (rowsOverride?: BulkRow[]) => {
+    const validRows = (rowsOverride ?? bulkRows).filter((r) => r.topic.trim());
     if (validRows.length === 0 || bulkRunning) return;
+
+    // Auto-name if empty
+    const now = new Date();
+    const dateLabel = now.toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
+    const runName = bulkRunName.trim() || `${dateLabel} Batch · ${validRows.length} article${validRows.length !== 1 ? "s" : ""}`;
+
+    // Create run in DB and get runId
+    let activeRunId: string | null = null;
+    try {
+      const res = await fetch("/api/bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "createRun", name: runName, total: validRows.length }),
+      });
+      const d = await res.json() as { runId?: string };
+      activeRunId = d.runId || null;
+      setBulkRunId(activeRunId);
+    } catch { /* non-fatal — continue without persistence */ }
 
     const items: BulkItem[] = validRows.map((r, i) => ({
       ...r,
@@ -345,6 +405,21 @@ export function ContentGeneratorTab({
       error: "",
       articlePath: "",
     }));
+
+    // Mutable local mirror of items so we can save accurate snapshots to DB
+    const localItems = items.map((i) => ({ ...i }));
+
+    const saveSnapshot = (overrides?: { status?: string; completedAt?: string }) => {
+      if (!activeRunId) return;
+      const done = localItems.filter((i) => i.stage === "done").length;
+      const failed = localItems.filter((i) => i.stage === "error").length;
+      const totalWords = localItems.reduce((s, i) => s + i.wordCount, 0);
+      fetch("/api/bulk", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runId: activeRunId, done, failed, totalWords, items: localItems, ...overrides }),
+      }).catch(() => {});
+    };
 
     setBulkItems(items);
     setBulkRunning(true);
@@ -376,12 +451,13 @@ export function ContentGeneratorTab({
           i === idx ? { ...item, stage: "queued", startedAt: Date.now(), elapsed: 0 } : item
         )
       );
+      localItems[idx] = { ...localItems[idx], stage: "queued", startedAt: Date.now(), elapsed: 0 };
 
       try {
         const res = await fetch("/api/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ topic: items[idx].topic, subKeywords: items[idx].subKeywords, region: items[idx].region || region }),
+          body: JSON.stringify({ topic: items[idx].topic, subKeywords: items[idx].subKeywords, region: items[idx].region || region, pipeline }),
           signal: controller.signal,
         });
 
@@ -437,6 +513,35 @@ export function ContentGeneratorTab({
                   return { ...item, ...updates };
                 })
               );
+
+              // Notify library to refresh when a bulk article finishes
+              if (event.stage === "done") onArticleGenerated?.();
+
+              // Mirror to localItems for DB snapshots
+              if (event.stage === "done" && event.detail) {
+                const d = event.detail;
+                localItems[idx] = {
+                  ...localItems[idx],
+                  stage: "done",
+                  finishedAt: Date.now(),
+                  elapsed: localItems[idx].startedAt ? Math.floor((Date.now() - localItems[idx].startedAt!) / 1000) : 0,
+                  wordCount: (d.wordCount as number) || 0,
+                  tableCount: (d.tableCount as number) || 0,
+                  qualityGrade: (d.qualityGrade as string) || "",
+                  qualityScore: (d.qualityScore as number) || 0,
+                  articlePath: (d.articlePath as string) || "",
+                };
+              } else if (event.stage === "error") {
+                localItems[idx] = {
+                  ...localItems[idx],
+                  stage: "error",
+                  error: event.message,
+                  finishedAt: Date.now(),
+                  elapsed: localItems[idx].startedAt ? Math.floor((Date.now() - localItems[idx].startedAt!) / 1000) : 0,
+                }
+              } else {
+                localItems[idx] = { ...localItems[idx], stage: event.stage };
+              }
             } catch {
               // skip malformed lines
             }
@@ -458,6 +563,9 @@ export function ContentGeneratorTab({
             return item;
           })
         );
+        if (!localItems[idx].finishedAt) {
+          localItems[idx] = { ...localItems[idx], stage: "done", finishedAt: Date.now(), elapsed: localItems[idx].startedAt ? Math.floor((Date.now() - localItems[idx].startedAt!) / 1000) : 0 };
+        }
       } catch (err) {
         if ((err as Error).name === "AbortError") {
           setBulkItems((prev) =>
@@ -474,6 +582,8 @@ export function ContentGeneratorTab({
               return item;
             })
           );
+          localItems[idx] = { ...localItems[idx], stage: "error", error: "Cancelled", finishedAt: Date.now() };
+          saveSnapshot();
           break;
         }
         setBulkItems((prev) =>
@@ -489,20 +599,44 @@ export function ContentGeneratorTab({
               : item
           )
         );
+        localItems[idx] = { ...localItems[idx], stage: "error", error: (err as Error).message, finishedAt: Date.now() };
       }
+
+      // Save snapshot after each item finishes
+      saveSnapshot();
     }
+
+    // Mark run complete
+    saveSnapshot({ status: "done", completedAt: new Date().toISOString() });
 
     clearInterval(timerInterval);
     bulkTimerRef.current = null;
     setBulkRunning(false);
     setBulkCurrentIndex(-1);
     bulkAbortRef.current = null;
+    setBulkRunName("");
+    setBulkRunId(null);
     loadArticles(); // refresh article list
-  }, [bulkRows, bulkRunning, region, loadArticles]);
+    loadPastRuns(); // refresh run history
+  }, [bulkRows, bulkRunning, bulkRunName, region, loadArticles, loadPastRuns]);
 
   const cancelBulkGeneration = useCallback(() => {
     bulkAbortRef.current?.abort();
   }, []);
+
+  // Retry a single failed bulk item by id
+  const retryBulkItem = useCallback((itemId: number) => {
+    const item = bulkItems.find((i) => i.id === itemId);
+    if (!item || bulkRunning) return;
+    startBulkGeneration([item]);
+  }, [bulkItems, bulkRunning, startBulkGeneration]);
+
+  // Retry all failed bulk items
+  const retryFailedBulk = useCallback(() => {
+    const failedRows = bulkItems.filter((i) => i.stage === "error");
+    if (failedRows.length === 0 || bulkRunning) return;
+    startBulkGeneration(failedRows);
+  }, [bulkItems, bulkRunning, startBulkGeneration]);
 
   // Cleanup timer on unmount
   useEffect(() => {
@@ -566,26 +700,66 @@ export function ContentGeneratorTab({
 
   return (
     <div className="max-w-4xl space-y-6">
-      {/* ── Mode Toggle ── */}
-      <div className="flex items-center gap-1 p-1 rounded-lg bg-th-bg-secondary w-fit">
-        {([
-          { id: "single" as const, label: "Single Article" },
-          { id: "bulk" as const, label: "Bulk Generate" },
-          { id: "news" as const, label: "News Pipeline" },
-        ]).map((m) => (
-          <button
-            key={m.id}
-            onClick={() => { if (!generating && !bulkRunning) setMode(m.id); }}
-            className={`px-4 py-2 text-sm font-medium rounded-md transition-all ${
-              mode === m.id
-                ? "bg-th-card text-th-accent shadow-sm"
-                : "text-th-text-muted hover:text-th-text"
-            }`}
-          >
-            {m.label}
-          </button>
-        ))}
+      {/* ── Mode + Pipeline Toggle Row ── */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        {/* Mode tabs */}
+        <div className="flex items-center gap-1 p-1 rounded-lg bg-th-bg-secondary w-fit">
+          {([
+            { id: "single" as const, label: "Single Article" },
+            { id: "bulk" as const, label: "Bulk Generate" },
+            { id: "news" as const, label: "News Pipeline" },
+          ]).map((m) => (
+            <button
+              key={m.id}
+              onClick={() => { if (!generating && !bulkRunning) setMode(m.id); }}
+              className={`px-4 py-2 text-sm font-medium rounded-md transition-all ${
+                mode === m.id
+                  ? "bg-th-card text-th-accent shadow-sm"
+                  : "text-th-text-muted hover:text-th-text"
+              }`}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Pipeline toggle — hidden for News (news always uses CG) */}
+        {mode !== "news" && (
+          <div className="flex items-center gap-1 rounded-lg bg-th-bg-secondary p-1 border border-th-border">
+            <button
+              type="button"
+              onClick={() => { setPipeline("cg"); setArticleType(""); }}
+              disabled={generating || bulkRunning}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                pipeline === "cg"
+                  ? "bg-th-card text-th-text shadow-sm border border-th-border"
+                  : "text-th-text-muted hover:text-th-text"
+              }`}
+            >
+              Content Generator
+            </button>
+            <button
+              type="button"
+              onClick={() => { setPipeline("atlas"); setArticleType(""); setCustomOutline(""); setShowCustomOutline(false); }}
+              disabled={generating || bulkRunning}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                pipeline === "atlas"
+                  ? "bg-th-accent text-white shadow-sm"
+                  : "text-th-text-muted hover:text-th-text"
+              }`}
+            >
+              ✦ ATLAS Smart Writer
+            </button>
+          </div>
+        )}
       </div>
+
+      {/* ATLAS info banner — shown across all modes */}
+      {pipeline === "atlas" && mode !== "news" && (
+        <div className="rounded-lg border border-th-accent/30 bg-th-accent/5 px-4 py-3 text-xs text-th-accent">
+          <strong>ATLAS</strong> — 11-stage verified pipeline: blueprint → deep research → data verification → writing → proofread.{mode === "bulk" ? " Each article takes ~10–15 min. Sub-keywords are ignored (ATLAS builds its own queries)." : " Slower but more accurate. No hallucinated tables."}
+        </div>
+      )}
 
       {/* ── BULK MODE ── */}
       {mode === "bulk" && (
@@ -594,7 +768,7 @@ export function ContentGeneratorTab({
           <div className="cs-card p-6">
             <h3 className="text-sm font-semibold text-th-text mb-1">Bulk Generate</h3>
             <p className="text-xs text-th-text-muted mb-4">
-              Upload your articles.xlsx or add topics manually. Sub-keywords can be auto-generated via DataForSEO.
+              Upload your articles.xlsx or add topics manually.{pipeline === "atlas" ? " ATLAS builds its own research queries — sub-keywords are ignored." : " Sub-keywords can be auto-generated via DataForSEO."}
             </p>
 
             {/* Upload + Add row buttons */}
@@ -765,6 +939,19 @@ export function ContentGeneratorTab({
               </div>
             )}
 
+            {/* Run name input */}
+            {bulkRows.length > 0 && !bulkRunning && bulkItems.length === 0 && (
+              <div className="mb-3">
+                <label className="block text-xs font-medium text-th-text-secondary mb-1">Run Name</label>
+                <input
+                  value={bulkRunName}
+                  onChange={(e) => setBulkRunName(e.target.value)}
+                  placeholder={`e.g. ${new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short" })} Batch · ${bulkRows.filter((r) => r.topic).length} articles`}
+                  className="cs-input text-sm"
+                />
+              </div>
+            )}
+
             {/* Auto-generate all keywords + Start buttons */}
             {bulkRows.length > 0 && !bulkRunning && bulkItems.length === 0 && (
               <div className="flex items-center gap-3">
@@ -795,7 +982,7 @@ export function ContentGeneratorTab({
                 )}
 
                 <button
-                  onClick={startBulkGeneration}
+                  onClick={() => startBulkGeneration()}
                   disabled={!bulkRows.some((r) => r.topic.trim())}
                   className="cs-btn cs-btn-primary"
                 >
@@ -944,7 +1131,15 @@ export function ContentGeneratorTab({
                             )}
 
                             {isError && item.error && (
-                              <span className="text-[11px] text-th-danger truncate max-w-[200px]">{item.error}</span>
+                              <span className="text-[11px] text-th-danger truncate max-w-[160px]">{item.error}</span>
+                            )}
+                            {isError && !bulkRunning && (
+                              <button
+                                onClick={() => retryBulkItem(item.id)}
+                                className="text-[11px] font-semibold text-th-accent border border-th-accent/40 hover:bg-th-accent/10 px-2 py-0.5 rounded transition-colors shrink-0"
+                              >
+                                ↺ Retry
+                              </button>
                             )}
                           </div>
                         </div>
@@ -1037,24 +1232,213 @@ export function ContentGeneratorTab({
                 </div>
               )}
 
-              {/* New batch button */}
+              {/* Retry failed + new batch */}
               {!bulkRunning && bulkItems.length > 0 && (
-                <button
-                  onClick={() => { setBulkItems([]); setBulkRows([]); }}
-                  className="mt-3 cs-btn cs-btn-ghost w-full"
-                >
-                  New Batch
-                </button>
+                <div className="mt-3 flex gap-2">
+                  {bulkErrors > 0 && (
+                    <button
+                      onClick={retryFailedBulk}
+                      className="cs-btn cs-btn-secondary flex-1 flex items-center justify-center gap-1.5"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" />
+                      </svg>
+                      Retry {bulkErrors} Failed
+                    </button>
+                  )}
+                  <button
+                    onClick={() => { setBulkItems([]); setBulkRows([]); }}
+                    className={`cs-btn cs-btn-ghost ${bulkErrors > 0 ? "flex-1" : "w-full"}`}
+                  >
+                    New Batch
+                  </button>
+                </div>
               )}
             </div>
           )}
+
+          {/* ── Past Runs ── */}
+          <div className="cs-card p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-sm font-semibold text-th-text flex items-center gap-2">
+                Past Runs
+                {pastRuns.length > 0 && (
+                  <span className="text-[11px] font-normal px-2 py-0.5 rounded-full bg-th-bg-secondary text-th-text-muted">{pastRuns.length}</span>
+                )}
+              </h3>
+              <button onClick={loadPastRuns} disabled={pastRunsLoading} className="text-xs text-th-text-muted hover:text-th-text transition-colors">
+                {pastRunsLoading ? "Loading…" : "↻ Refresh"}
+              </button>
+            </div>
+
+            {pastRunsLoading && pastRuns.length === 0 ? (
+              <div className="flex items-center gap-2 text-sm text-th-text-muted py-4">
+                <span className="w-4 h-4 rounded-full border-2 border-th-accent border-t-transparent animate-spin" />
+                Loading run history…
+              </div>
+            ) : pastRuns.length === 0 ? (
+              <p className="text-sm text-th-text-muted py-2">No past runs yet. Start a batch above to track it here.</p>
+            ) : (
+              <div className="space-y-2">
+                {pastRuns.map((run) => {
+                  const isExpanded = expandedRunId === run.id;
+                  const successRate = run.total > 0 ? Math.round((run.done / run.total) * 100) : 0;
+                  return (
+                    <div key={run.id} className="border border-th-border rounded-lg overflow-hidden">
+                      {/* Run header row */}
+                      <div
+                        className="flex items-center gap-3 px-4 py-3 bg-th-bg-secondary hover:bg-th-card cursor-pointer transition-colors"
+                        onClick={() => {
+                          if (isExpanded) { setExpandedRunId(null); return; }
+                          setExpandedRunId(run.id);
+                          setExpandedRunItems([]);
+                          setExpandedRunLoading(true);
+                          fetch(`/api/bulk?runId=${run.id}`)
+                            .then((r) => r.json())
+                            .then((d: { items?: BulkItem[] }) => setExpandedRunItems(d.items || []))
+                            .catch(() => {})
+                            .finally(() => setExpandedRunLoading(false));
+                        }}
+                      >
+                        {/* Chevron */}
+                        <svg
+                          className={`w-4 h-4 text-th-text-muted shrink-0 transition-transform ${isExpanded ? "rotate-90" : ""}`}
+                          fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                        </svg>
+
+                        {/* Name + date */}
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-th-text truncate">{run.name}</p>
+                          <p className="text-[11px] text-th-text-muted mt-0.5">
+                            {new Date(run.started_at).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                            {run.completed_at && (
+                              <span className="ml-1">· {Math.round((new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 60000)}m total</span>
+                            )}
+                          </p>
+                        </div>
+
+                        {/* Stats chips */}
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="text-[11px] px-2 py-0.5 rounded-full bg-th-success/15 text-th-success font-semibold">{run.done} done</span>
+                          {run.failed > 0 && (
+                            <span className="text-[11px] px-2 py-0.5 rounded-full bg-th-danger/15 text-th-danger font-semibold">{run.failed} failed</span>
+                          )}
+                          <span className="text-[11px] text-th-text-muted">{run.total_words > 0 ? `${(run.total_words / 1000).toFixed(1)}k words` : `${run.total} total`}</span>
+                          {/* Progress bar */}
+                          <div className="w-16 h-1.5 bg-th-border rounded-full overflow-hidden">
+                            <div className="h-full bg-th-success rounded-full" style={{ width: `${successRate}%` }} />
+                          </div>
+                          {/* Resume — only for incomplete runs */}
+                          {run.done < run.total && !bulkRunning && (
+                            <button
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                // Load items if not already expanded
+                                let items: BulkItem[] = expandedRunId === run.id ? expandedRunItems : [];
+                                if (items.length === 0) {
+                                  const d = await fetch(`/api/bulk?runId=${run.id}`).then(r => r.json()) as { items?: BulkItem[] };
+                                  items = d.items || [];
+                                }
+                                const pending: BulkRow[] = items
+                                  .filter(i => i.stage !== "done")
+                                  .map(i => ({ id: i.id, topic: i.topic, subKeywords: (i as BulkItem & { subKeywords?: string }).subKeywords || "", category: (i as BulkItem & { category?: string }).category || "", region: (i as BulkItem & { region?: string }).region || "India" }));
+                                if (pending.length === 0) return;
+                                setBulkRunName(`Resume: ${run.name}`);
+                                setMode("bulk");
+                                startBulkGeneration(pending);
+                              }}
+                              className="px-2 py-0.5 rounded text-[11px] font-medium bg-th-accent/15 text-th-accent hover:bg-th-accent/25 transition-colors"
+                              title="Resume incomplete articles"
+                            >
+                              ▶ Resume
+                            </button>
+                          )}
+                          {/* Delete */}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (!confirm(`Delete run "${run.name}"?`)) return;
+                              fetch(`/api/bulk?runId=${run.id}`, { method: "DELETE" })
+                                .then(() => loadPastRuns())
+                                .catch(() => {});
+                            }}
+                            className="p-1 rounded text-th-text-muted hover:text-th-danger hover:bg-th-danger-soft transition-colors ml-1"
+                            title="Delete run"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Expanded items */}
+                      {isExpanded && (
+                        <div className="border-t border-th-border p-3 space-y-1.5 bg-th-card">
+                          {expandedRunLoading ? (
+                            <div className="flex items-center gap-2 text-sm text-th-text-muted py-2">
+                              <span className="w-4 h-4 rounded-full border-2 border-th-accent border-t-transparent animate-spin" />
+                              Loading…
+                            </div>
+                          ) : expandedRunItems.length === 0 ? (
+                            <p className="text-sm text-th-text-muted">No item data saved for this run.</p>
+                          ) : (
+                            expandedRunItems.map((item, i) => {
+                              const isDone = item.stage === "done";
+                              const isError = item.stage === "error";
+                              return (
+                                <div key={i} className={`flex items-center gap-3 p-2 rounded-lg text-sm ${isDone ? "bg-th-success-soft" : isError ? "bg-th-danger-soft" : "bg-th-bg-secondary"}`}>
+                                  <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 ${isDone ? "bg-th-success text-white" : isError ? "bg-th-danger text-white" : "bg-th-border text-th-text-muted"}`}>
+                                    {isDone ? "✓" : isError ? "✕" : i + 1}
+                                  </div>
+                                  <span className="flex-1 truncate font-medium text-th-text">{item.topic}</span>
+                                  {isDone && item.wordCount > 0 && (
+                                    <span className="text-xs text-th-text-muted shrink-0">{item.wordCount.toLocaleString()} words</span>
+                                  )}
+                                  {isDone && item.qualityGrade && (
+                                    <span className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 ${item.qualityGrade.startsWith("A") ? "bg-th-success text-white" : item.qualityGrade.startsWith("B") ? "bg-th-accent text-white" : "bg-th-warning text-white"}`}>
+                                      {item.qualityGrade}
+                                    </span>
+                                  )}
+                                  {isDone && item.elapsed > 0 && (
+                                    <span className="text-xs text-th-text-muted shrink-0">{item.elapsed >= 60 ? `${Math.floor(item.elapsed / 60)}m${item.elapsed % 60}s` : `${item.elapsed}s`}</span>
+                                  )}
+                                  {isError && (
+                                    <span className="text-xs text-th-danger truncate max-w-[180px] shrink-0">{item.error}</span>
+                                  )}
+                                  {isDone && item.articlePath && (
+                                    <button
+                                      onClick={() => {
+                                        const parts = item.articlePath.split("/");
+                                        const slug = parts.length >= 2 ? parts[parts.length - 2] : "";
+                                        if (slug) { setMode("single"); viewArticle(slug); }
+                                      }}
+                                      className="text-xs text-th-accent hover:underline shrink-0"
+                                    >
+                                      View
+                                    </button>
+                                  )}
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </>
       )}
 
       {/* ── NEWS MODE ── */}
       {mode === "news" && <NewsPipeline
         onView={(slug) => { setMode("single"); viewArticle(slug); }}
-        onRefreshArticles={loadArticles}
+        onRefreshArticles={() => { loadArticles(); onArticleGenerated?.(); }}
       />}
 
       {/* ── SINGLE MODE ── */}
@@ -1069,7 +1453,9 @@ export function ContentGeneratorTab({
       )}
       {/* ── Topic Input Card ── */}
       <div className="cs-card p-6">
-        <h3 className="text-sm font-semibold text-th-text mb-4">Generate Article</h3>
+        <div className="mb-4">
+          <h3 className="text-sm font-semibold text-th-text">Generate Article</h3>
+        </div>
 
         <div className="space-y-4">
           {/* Topic */}
@@ -1088,7 +1474,8 @@ export function ContentGeneratorTab({
             />
           </div>
 
-          {/* Sub-keywords + Region row */}
+          {/* Sub-keywords + Region row — hidden for ATLAS (it builds its own queries) */}
+          {pipeline === "cg" && (
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-medium text-th-text-secondary mb-1.5">
@@ -1116,11 +1503,12 @@ export function ContentGeneratorTab({
               />
             </div>
           </div>
+          )}
 
           {/* Article Type */}
           <div>
             <label className="block text-xs font-medium text-th-text-secondary mb-1.5">
-              Article Type <span className="text-th-text-muted">(optional — auto-detected if blank)</span>
+              Content Type <span className="text-th-text-muted">(optional — auto-detected if blank)</span>
             </label>
             <select
               value={articleType}
@@ -1128,19 +1516,33 @@ export function ContentGeneratorTab({
               className="cs-input"
               disabled={generating}
             >
-              <option value="">Auto-detect</option>
-              <option value="college_profile">College Profile</option>
-              <option value="ranking_list">Ranking List</option>
-              <option value="fee_reference">Fee Reference</option>
-              <option value="exam_guide">Exam Guide</option>
-              <option value="career_guide">Career Guide</option>
-              <option value="comparison">Comparison</option>
-              <option value="cutoff_data">Cutoff Data</option>
-              <option value="informational">Informational</option>
+              {pipeline === "cg" ? (
+                <>
+                  <option value="">Auto-detect</option>
+                  <option value="college_profile">College Profile</option>
+                  <option value="ranking_list">Ranking List</option>
+                  <option value="fee_reference">Fee Reference</option>
+                  <option value="exam_guide">Exam Guide</option>
+                  <option value="career_guide">Career Guide</option>
+                  <option value="comparison">Comparison</option>
+                  <option value="cutoff_data">Cutoff Data</option>
+                  <option value="informational">Informational</option>
+                </>
+              ) : (
+                <>
+                  <option value="">Auto-detect from topic</option>
+                  <option value="college_profile">College Profile (overview)</option>
+                  <option value="college_placement">College Placements</option>
+                  <option value="exam_guide">Exam Guide</option>
+                  <option value="ranking_list">Rankings</option>
+                  <option value="career_guide">Career Guide</option>
+                </>
+              )}
             </select>
           </div>
 
-          {/* Custom Outline toggle */}
+          {/* Custom Outline — only for CG pipeline */}
+          {pipeline === "cg" && (
           <div>
             <button
               type="button"
@@ -1164,6 +1566,7 @@ export function ContentGeneratorTab({
               />
             )}
           </div>
+          )}
 
           {/* Actions */}
           <div className="flex items-center gap-3 pt-2">
@@ -1176,7 +1579,7 @@ export function ContentGeneratorTab({
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
                 </svg>
-                Generate Article
+                {pipeline === "atlas" ? "Run ATLAS Pipeline" : "Generate Article"}
               </button>
             ) : (
               <button onClick={cancelGeneration} className="cs-btn cs-btn-secondary text-th-danger">
@@ -1217,8 +1620,8 @@ export function ContentGeneratorTab({
           {/* Stage indicators */}
           <div className="flex items-center gap-1 mb-6">
             {STAGES.map((stage, i) => {
-              const isActive = stage.id === currentStage;
-              const isComplete = stageIndex > i;
+              const isActive = stage.id === currentStage && currentStage !== "done";
+              const isComplete = stageIndex > i || currentStage === "done";
               const isError = currentStage === "error";
 
               let dotColor = "bg-th-border";
@@ -1289,7 +1692,13 @@ export function ContentGeneratorTab({
               <svg className="w-5 h-5 text-th-danger shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
               </svg>
-              <span className="text-sm text-th-danger">{error}</span>
+              <span className="text-sm text-th-danger flex-1">{error}</span>
+              <button
+                onClick={startGeneration}
+                className="text-xs font-semibold text-th-danger border border-th-danger/40 hover:bg-th-danger/10 px-2.5 py-1 rounded-md transition-colors shrink-0"
+              >
+                ↺ Try Again
+              </button>
             </div>
           )}
 
@@ -1568,6 +1977,7 @@ function renderInsightCharts(html: string): string {
 /* ── Clean article HTML ── */
 function cleanArticleHtml(html: string): string {
   let cleaned = html
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
     .replace(/cellspacing="[^"]*"/gi, "")
     .replace(/cellpadding="[^"]*"/gi, "")
     .replace(/border="[^"]*"/gi, "")
@@ -1580,6 +1990,39 @@ function cleanArticleHtml(html: string): string {
 }
 
 /* ── Article Preview + Rich Editor + Publish ── */
+function parseSectionsGen(html: string): { heading: string; tag: string; sectionHtml: string }[] {
+  const sections: { heading: string; tag: string; sectionHtml: string }[] = [];
+  const regex = /<(h[23])([^>]*)>([\s\S]*?)<\/h[23]>([\s\S]*?)(?=<h[23][\s>]|$)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(html)) !== null) {
+    const tag = match[1]; const attrs = match[2]; const headingInner = match[3]; const body = match[4].trim();
+    const headingText = headingInner.replace(/<[^>]+>/g, "").trim();
+    if (!headingText) continue;
+    sections.push({ heading: headingText, tag, sectionHtml: `<${tag}${attrs}>${headingInner}</${tag}>\n${body}` });
+  }
+  return sections;
+}
+
+/* ── Build smart rewrite instructions from quality report ── */
+function buildSmartRewriteInstructions(quality: ArticleMeta["quality"]): string {
+  if (!quality) return "";
+  const fixes: string[] = [];
+  if (quality.data_density < 2.5)
+    fixes.push(`boost data density (currently ${quality.data_density.toFixed(1)}/100w — add specific stats, fees, ranks, percentages)`);
+  if (!quality.has_faq)
+    fixes.push("add a FAQ section answering the 5 most common reader questions about this topic");
+  if (quality.table_count < 3)
+    fixes.push(`add more comparison or data tables (currently ${quality.table_count} — target at least 4)`);
+  if (quality.fact_check_rate < 80)
+    fixes.push(`improve factual accuracy (currently ${Math.round(quality.fact_check_rate)}% verified — back every number with a named source)`);
+  if (quality.readability === "Poor" || quality.readability === "Very Poor")
+    fixes.push("improve readability — shorter sentences, clearer section openings, avoid jargon");
+  if (quality.quality_issues?.length)
+    quality.quality_issues.slice(0, 3).forEach(i => fixes.push(i.toLowerCase()));
+  if (fixes.length === 0) return "";
+  return `Target Grade A (score 90+). Fix these specific issues:\n- ${fixes.join("\n- ")}`;
+}
+
 function ArticlePreview({ html, meta, slug }: { html: string | null; meta: ArticleMeta | null; slug?: string }) {
   const [editing, setEditing] = useState(false);
   const [editedHtml, setEditedHtml] = useState(html || "");
@@ -1593,11 +2036,172 @@ function ArticlePreview({ html, meta, slug }: { html: string | null; meta: Artic
   const [publishing, setPublishing] = useState(false);
   const [publishResult, setPublishResult] = useState<{ ok?: boolean; post_url?: string; edit_url?: string; error?: string } | null>(null);
   const [publishStatus, setPublishStatus] = useState<"draft" | "publish">("draft");
+  const [showDownloadMenu, setShowDownloadMenu] = useState(false);
+
+  // ── Rewrite panel state ──
+  const [showRewrite, setShowRewrite] = useState(false);
+  const [analyzeResult, setAnalyzeResult] = useState<{ titleIssue: { issue: string; suggested: string } | null; sections: { heading: string; issue: string }[] } | null>(null);
+  const [sectionInstructions, setSectionInstructions] = useState<Record<number, string>>({});
+  const [titleInstruction, setTitleInstruction] = useState("");
+  const [globalInstruction, setGlobalInstruction] = useState("Improve accuracy and depth. Replace vague prose with specific facts, numbers, and named sources.");
+  const [analyzing, setAnalyzing] = useState(false);
+  const [rewriteProgress, setRewriteProgress] = useState<{ current: number; total: number; sectionName: string } | null>(null);
+  const [rewriteDone, setRewriteDone] = useState(false);
+  const [rewriteError, setRewriteError] = useState("");
+  const [liveTitle, setLiveTitle] = useState(meta?.title || "");
+
   const editorRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { setEditedHtml(html || ""); }, [html]);
 
   if (!html) return <p className="text-sm text-th-text-muted">No article HTML available.</p>;
+
+  const sections = parseSectionsGen(editedHtml || html || "");
+
+  // ── Client-side generic title detection (fallback when LLM misses it) ──
+  const GENERIC_TITLE_PATTERNS = [
+    /overview,?\s*key highlights/i, /key highlights.*why it matters/i,
+    /why it matters/i, /complete guide/i, /everything you need to know/i,
+    /key facts.*why/i, /overview.*key facts/i, /what it is.*key facts/i,
+    /types.*categories.*explained/i, /: overview$/i,
+  ];
+  const detectGenericTitle = (title: string): string => {
+    if (!title) return "";
+    const tl = title.toLowerCase();
+    if (GENERIC_TITLE_PATTERNS.some(p => p.test(tl))) {
+      return `Replace with a specific title containing concrete data (rank, fees, or key stat from the article). Current title is too generic.`;
+    }
+    return "";
+  };
+
+  // ── Run analysis — populates per-section issue cards ──
+  const runAnalyze = async () => {
+    if (!meta || analyzing) return;
+    setAnalyzing(true);
+    setAnalyzeResult(null);
+    setRewriteError("");
+    try {
+      const ar = await fetch("/api/article/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          html: editedHtml || html || "",
+          topic: meta.topic,
+          contentType: meta.content_type,
+          qualityScore: meta.quality?.overall_score ?? 0,
+          currentTitle: liveTitle || meta.title,
+        }),
+      });
+      if (ar.ok) {
+        const ad = await ar.json() as { titleIssue?: { issue: string; suggested: string } | null; sections?: { heading: string; issue: string }[]; error?: string };
+        if (!ad.error) {
+          setAnalyzeResult({ titleIssue: ad.titleIssue ?? null, sections: ad.sections ?? [] });
+          // Pre-fill title instruction: use LLM suggestion, or fall back to client-side detection
+          const suggested = ad.titleIssue?.suggested || detectGenericTitle(liveTitle || meta.title);
+          if (suggested) setTitleInstruction(suggested);
+          const prefilled: Record<number, string> = {};
+          sections.forEach((sec, idx) => {
+            const secLow = sec.heading.toLowerCase();
+            const match = (ad.sections ?? []).find(s => {
+              const sLow = s.heading.toLowerCase();
+              return secLow.includes(sLow.slice(0, 15)) || sLow.includes(secLow.slice(0, 15));
+            });
+            if (match) prefilled[idx] = match.issue;
+          });
+          setSectionInstructions(prefilled);
+        }
+      }
+    } catch { setRewriteError("Analysis failed — check connection and try again."); }
+    finally { setAnalyzing(false); }
+  };
+
+  // ── Run section-by-section rewrite using /api/rewrite ──
+  const runSectionRewrites = async () => {
+    if (!meta) return;
+    // Use per-section instruction if set, else fall back to global instruction
+    const fallback = globalInstruction.trim();
+    const toFix = sections
+      .map((section, idx) => ({ section, idx, instruction: sectionInstructions[idx]?.trim() || fallback }))
+      .filter(({ instruction }) => instruction.length > 0);
+
+    if (toFix.length === 0 && !titleInstruction.trim()) {
+      setRewriteError("Add at least one instruction before starting the rewrite.");
+      return;
+    }
+
+    setRewriteError("");
+    setRewriteDone(false);
+    const totalSteps = toFix.length + (titleInstruction.trim() ? 1 : 0);
+    setRewriteProgress({ current: 0, total: totalSteps, sectionName: "Starting…" });
+
+    let currentHtml = editedHtml || html || "";
+
+    if (titleInstruction.trim()) {
+      const newTitle = titleInstruction.trim();
+      setLiveTitle(newTitle);
+      if (slug) await saveTitle(newTitle);
+      // Replace <h1>...</h1> in the article HTML so the preview updates too
+      currentHtml = currentHtml.replace(/<h1[^>]*>[\s\S]*?<\/h1>/i, `<h1>${newTitle}</h1>`);
+      setRewriteProgress({ current: 1, total: totalSteps, sectionName: "Title updated" });
+    }
+
+    const titleOffset = titleInstruction.trim() ? 1 : 0;
+    for (let i = 0; i < toFix.length; i++) {
+      const { section, instruction } = toFix[i];
+      setRewriteProgress({ current: titleOffset + i + 1, total: totalSteps, sectionName: section.heading });
+      try {
+        const res = await fetch("/api/rewrite", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sectionHeading: section.heading,
+            sectionHtml: section.sectionHtml,
+            instruction,
+            topicContext: meta.topic,
+            qualityIssues: meta.quality?.quality_issues,
+            slug,
+          }),
+        });
+        const data = await res.json() as { html?: string; error?: string };
+        if (res.ok && data.html) {
+          currentHtml = currentHtml.replace(section.sectionHtml, data.html);
+        }
+      } catch { /* continue with remaining sections */ }
+    }
+
+    setEditedHtml(currentHtml);
+    if (slug) {
+      await fetch("/api/article", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug, html: currentHtml }),
+      });
+    }
+    setRewriteProgress(null);
+    setRewriteDone(true);
+  };
+
+  const downloadArticle = (format: "html" | "word" | "pdf") => {
+    const title = meta?.title || slug || "article";
+    const safeTitle = title.replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "-").toLowerCase().slice(0, 60);
+    const content = editedHtml || html || "";
+    const baseStyle = "body{font-family:Georgia,serif;max-width:820px;margin:40px auto;padding:0 24px;line-height:1.7;color:#1a1a1a}h1,h2,h3{color:#111;margin-top:1.5em}table{border-collapse:collapse;width:100%;margin:1em 0}td,th{border:1px solid #ccc;padding:8px 10px;text-align:left}th{background:#f5f5f5;font-weight:600}img{max-width:100%}";
+    if (format === "html") {
+      const out = `<!DOCTYPE html>\n<html lang="en">\n<head><meta charset="UTF-8"><title>${title}</title><style>${baseStyle}</style></head>\n<body>${content}</body>\n</html>`;
+      const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(new Blob([out], { type: "text/html" })), download: `${safeTitle}.html` });
+      a.click(); URL.revokeObjectURL(a.href);
+    } else if (format === "word") {
+      const out = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="UTF-8"><title>${title}</title><style>body{font-family:Calibri,sans-serif;font-size:11pt;line-height:1.6}h1{font-size:18pt}h2{font-size:14pt}h3{font-size:12pt}table{border-collapse:collapse;width:100%}td,th{border:1px solid #999;padding:5px 8px}th{background:#f0f0f0}</style></head><body>${content}</body></html>`;
+      const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(new Blob(["\ufeff" + out], { type: "application/msword" })), download: `${safeTitle}.doc` });
+      a.click(); URL.revokeObjectURL(a.href);
+    } else if (format === "pdf") {
+      const win = window.open("", "_blank");
+      if (!win) return;
+      win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${title}</title><style>${baseStyle}@media print{body{max-width:none;margin:0;padding:24px}}</style></head><body>${content}<script>window.onload=function(){window.print();}<\/script></body></html>`);
+      win.document.close();
+    }
+    setShowDownloadMenu(false);
+  };
 
   // Sync contentEditable → state
   const syncFromEditor = () => {
@@ -1657,9 +2261,11 @@ function ArticlePreview({ html, meta, slug }: { html: string | null; meta: Artic
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: meta.title, type: "cover" }),
       });
-      const data = await res.json();
-      if (data.url) setCoverImageUrl(data.url);
-      else alert(data.error || "Failed to generate image");
+      const data = await res.json() as { url?: string; error?: string };
+      if (!data.url) { alert(data.error || "Failed to generate image"); return; }
+      // Compose: background image + title text overlay → JPEG data URL
+      const composed = await composeCoverImage(data.url, meta.title);
+      setCoverImageUrl(composed);
     } catch (e) { alert((e as Error).message); }
     finally { setGeneratingCover(false); }
   };
@@ -1687,21 +2293,213 @@ function ArticlePreview({ html, meta, slug }: { html: string | null; meta: Artic
     syncFromEditor();
   };
 
+  const saveTitle = async (newTitle: string) => {
+    if (!slug || !newTitle.trim() || newTitle === (meta?.title || "")) return;
+    try {
+      await fetch("/api/article", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ slug, title: newTitle.trim() }) });
+    } catch { /* non-blocking */ }
+  };
+
   const q = meta?.quality;
 
   return (
     <div className="space-y-5">
       {/* Header */}
       {meta && (
-        <div className="pb-4 border-b border-th-border">
-          <h3 className="text-lg font-semibold text-th-text">{meta.title}</h3>
-          <div className="flex items-center gap-3 mt-2 text-xs text-th-text-muted flex-wrap">
-            <span className="cs-badge bg-th-accent-soft text-th-accent">{meta.content_type.replace("_", " ")}</span>
-            <span>{meta.word_count.toLocaleString()} words</span>
-            <span>{meta.table_count} tables</span>
-            <span>{meta.section_count} sections</span>
-            {meta.generation_time > 0 && <span>{Math.round(meta.generation_time)}s</span>}
+        <div className="pb-4 border-b border-th-border flex items-start justify-between gap-4">
+          <div className="min-w-0 flex-1">
+            <input
+              type="text"
+              value={liveTitle || meta.title}
+              onChange={(e) => setLiveTitle(e.target.value)}
+              onBlur={(e) => saveTitle(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.currentTarget.blur(); } }}
+              className="w-full text-lg font-semibold text-th-text bg-transparent border-b border-transparent hover:border-th-accent/40 focus:border-th-accent focus:outline-none pb-0.5 transition-colors"
+              title="Click to edit article title"
+            />
+            <div className="flex items-center gap-3 mt-2 text-xs text-th-text-muted flex-wrap">
+              <span className="cs-badge bg-th-accent-soft text-th-accent">{meta.content_type.replace("_", " ")}</span>
+              <span>{meta.word_count.toLocaleString()} words</span>
+              <span>{meta.table_count} tables</span>
+              <span>{meta.section_count} sections</span>
+              {meta.generation_time > 0 && <span>{Math.round(meta.generation_time)}s</span>}
+            </div>
           </div>
+          {/* Rewrite + Download buttons */}
+          <div className="flex items-center gap-2 flex-shrink-0">
+          <button
+            onClick={() => {
+              setShowRewrite((v) => !v);
+              setRewriteError("");
+              setRewriteDone(false);
+            }}
+            className={`cs-btn text-xs flex items-center gap-1.5 ${meta?.quality?.overall_grade === "D" ? "cs-btn-primary" : "cs-btn-secondary"}`}
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" />
+            </svg>
+            {meta?.quality?.overall_grade === "D" ? "Rewrite (Grade D)" : "Rewrite"}
+          </button>
+          <div className="relative">
+            <button
+              onClick={() => setShowDownloadMenu((v) => !v)}
+              className="cs-btn cs-btn-secondary text-xs flex items-center gap-1.5"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+              </svg>
+              Download
+              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+              </svg>
+            </button>
+            {showDownloadMenu && (
+              <div className="absolute right-0 top-full mt-1 z-20 bg-th-card border border-th-border rounded-lg shadow-lg py-1 w-40">
+                {([["html", "HTML File"], ["word", "Word (.doc)"], ["pdf", "PDF (Print)"]] as [Parameters<typeof downloadArticle>[0], string][]).map(([fmt, label]) => (
+                  <button key={fmt} onClick={() => downloadArticle(fmt)} className="w-full text-left px-3 py-2 text-xs hover:bg-th-card-hover text-th-text transition-colors">
+                    {label}
+                  </button>
+                ))}
+                <div className="border-t border-th-border my-1" />
+                <button
+                  onClick={() => { setShowDownloadMenu(false); const a = document.createElement("a"); a.href = `/api/article?slug=${slug}&part=sources`; a.download = `${slug}-sources.txt`; document.body.appendChild(a); a.click(); document.body.removeChild(a); }}
+                  className="w-full text-left px-3 py-2 text-xs hover:bg-th-card-hover text-th-text transition-colors"
+                >
+                  Sources (.txt)
+                </button>
+              </div>
+            )}
+          </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Rewrite Panel ── */}
+      {showRewrite && (
+        <div className="p-4 rounded-lg border border-th-border bg-th-bg-secondary space-y-4">
+          <div className="flex items-center justify-between">
+            <h4 className="text-sm font-semibold text-th-text">Rewrite Article</h4>
+            <button onClick={() => { setShowRewrite(false); setAnalyzeResult(null); setRewriteDone(false); setRewriteError(""); }} className="text-xs text-th-text-muted hover:text-th-text">✕ Close</button>
+          </div>
+
+          {/* Step 1: Analyse button */}
+          {!analyzeResult && !analyzing && !rewriteProgress && !rewriteDone && (
+            <button onClick={runAnalyze} className="cs-btn cs-btn-secondary text-xs w-full flex items-center justify-center gap-2">
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23-.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5" /></svg>
+              Analyse Article
+            </button>
+          )}
+
+          {/* Analysing spinner */}
+          {analyzing && (
+            <div className="flex items-center gap-2 text-sm text-th-accent">
+              <span className="w-4 h-4 rounded-full border-2 border-th-accent border-t-transparent animate-spin shrink-0" />
+              Analysing article sections…
+            </div>
+          )}
+
+          {/* Step 2: Section cards after analysis */}
+          {analyzeResult && !rewriteProgress && !rewriteDone && (
+            <div className="space-y-3">
+              {/* Title card */}
+              <div className="rounded-lg border border-th-border bg-th-card p-3 space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-th-border text-th-text-muted">H1</span>
+                  <span className="text-sm font-medium text-th-text">Article Title</span>
+                </div>
+                {analyzeResult.titleIssue && (
+                  <p className="text-[11px] text-th-warning bg-th-warning/10 rounded px-2 py-1.5">⚠ {analyzeResult.titleIssue.issue}</p>
+                )}
+                <input
+                  type="text"
+                  value={titleInstruction}
+                  onChange={(e) => setTitleInstruction(e.target.value)}
+                  placeholder="Type the new title here, or leave blank to keep current…"
+                  className="cs-input w-full text-sm"
+                />
+              </div>
+
+              {/* Global instruction — applies to all sections without a specific instruction */}
+              <div className="rounded-lg border border-th-accent/30 bg-th-accent-soft p-3 space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-th-accent/40 text-th-accent">ALL</span>
+                  <span className="text-sm font-medium text-th-text">Apply to all sections</span>
+                  <span className="text-[11px] text-th-text-muted ml-auto">sections without their own instruction use this</span>
+                </div>
+                <textarea
+                  value={globalInstruction}
+                  onChange={(e) => setGlobalInstruction(e.target.value)}
+                  rows={2}
+                  className="cs-input w-full text-sm resize-none"
+                />
+              </div>
+
+              {/* Section cards */}
+              {sections.map((section, idx) => {
+                const detected = analyzeResult.sections.find(s => {
+                  const sLow = s.heading.toLowerCase();
+                  const secLow = section.heading.toLowerCase();
+                  return secLow.includes(sLow.slice(0, 15)) || sLow.includes(secLow.slice(0, 15));
+                });
+                return (
+                  <div key={idx} className="rounded-lg border border-th-border bg-th-card p-3 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-th-border text-th-text-muted">{section.tag.toUpperCase()}</span>
+                      <span className="text-sm font-medium text-th-text truncate">{section.heading}</span>
+                    </div>
+                    {detected && (
+                      <p className="text-[11px] text-th-warning bg-th-warning/10 rounded px-2 py-1.5">⚠ {detected.issue}</p>
+                    )}
+                    <textarea
+                      value={sectionInstructions[idx] || ""}
+                      onChange={(e) => setSectionInstructions(prev => ({ ...prev, [idx]: e.target.value }))}
+                      placeholder={`Override for this section only, or leave blank to use the global instruction…`}
+                      rows={2}
+                      className="cs-input w-full text-sm resize-none"
+                    />
+                  </div>
+                );
+              })}
+
+              {/* Action buttons */}
+              <div className="flex gap-2 pt-1">
+                <button onClick={runSectionRewrites} className="cs-btn cs-btn-primary text-xs flex-1">
+                  Start Rewrite
+                </button>
+                <button onClick={runAnalyze} className="cs-btn cs-btn-secondary text-xs">
+                  Re-analyse
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Progress bar */}
+          {rewriteProgress && (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 text-sm text-th-accent">
+                <span className="w-4 h-4 rounded-full border-2 border-th-accent border-t-transparent animate-spin shrink-0" />
+                <span className="truncate">Rewriting: {rewriteProgress.sectionName}</span>
+              </div>
+              <div className="w-full h-1.5 rounded-full bg-th-border overflow-hidden">
+                <div className="h-full bg-th-accent transition-all duration-300" style={{ width: `${(rewriteProgress.current / rewriteProgress.total) * 100}%` }} />
+              </div>
+              <p className="text-xs text-th-text-muted">{rewriteProgress.current} of {rewriteProgress.total} steps</p>
+            </div>
+          )}
+
+          {rewriteError && <p className="text-sm text-th-danger">{rewriteError}</p>}
+
+          {rewriteDone && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 p-3 rounded-lg bg-th-success-soft">
+                <svg className="w-4 h-4 text-th-success shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                <span className="text-sm text-th-success font-medium">Rewrite complete! Article saved.</span>
+              </div>
+              <button onClick={() => { setRewriteDone(false); setAnalyzeResult(null); setSectionInstructions({}); setTitleInstruction(""); setGlobalInstruction("Improve accuracy and depth. Replace vague prose with specific facts, numbers, and named sources."); setRewriteError(""); }} className="cs-btn cs-btn-secondary text-xs w-full">
+                Analyse Again
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -2249,7 +3047,7 @@ function NewsPipeline({ onView, onRefreshArticles }: { onView: (slug: string) =>
             const event: ProgressEvent = JSON.parse(line.slice(6));
             setNewsGenEvents((prev) => [...prev, event]);
             setNewsGenStage(event.stage);
-            if (event.stage === "done" && event.detail) setNewsGenResult(event.detail);
+            if (event.stage === "done" && event.detail) { setNewsGenResult(event.detail); }
             if (event.stage === "error") setNewsGenError(event.message);
           } catch { /* skip */ }
         }
@@ -3042,6 +3840,9 @@ function ArticleLibrary({
                       </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
+                      {a.source === "atlas" && (
+                        <span className="cs-badge bg-th-accent/10 text-th-accent border border-th-accent/30 text-[10px] font-semibold">ATLAS</span>
+                      )}
                       {a.quality_grade && (
                         <span className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${gradeColor[a.quality_grade] || "bg-th-bg-secondary text-th-text-muted"}`}>
                           {a.quality_grade}

@@ -1,12 +1,25 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { tabs, type TabKey } from "./types";
+
+/* ── URL slug ↔ TabKey mapping ── */
+const TAB_TO_SLUG: Record<TabKey, string> = {
+  Dashboard: "dashboard",
+  "Content Generator": "generator",
+  "Content Library": "library",
+  "AEO & SRO": "aeo",
+  Configuration: "config",
+};
+const SLUG_TO_TAB: Record<string, TabKey> = Object.fromEntries(
+  Object.entries(TAB_TO_SLUG).map(([k, v]) => [v, k as TabKey])
+);
 import { ConfigurationTab } from "./tabs/configuration-tab";
 import { ContentGeneratorTab } from "./tabs/content-generator-tab";
 import ContentLibraryTab from "./tabs/content-library-tab";
 import DashboardTab from "./tabs/dashboard-tab";
-import AeoTab, { type AeoSuggestions } from "./tabs/aeo-tab";
+import AeoTab, { type AeoSuggestions, type SubTab, NAV_GROUPS } from "./tabs/aeo-tab";
 
 /* ── Icons ── */
 const icons: Record<TabKey, React.ReactNode> = {
@@ -47,16 +60,44 @@ const tabDescriptions: Record<TabKey, string> = {
 };
 
 export function ContentStudioDashboard() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
   const [activeTab, setActiveTab] = useState<TabKey>("Dashboard");
+  const [activeSubTab, setActiveSubTab] = useState<SubTab>("aeo");
   const [collapsed, setCollapsed] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [mounted, setMounted] = useState(false);
   const [stats, setStats] = useState<{ total: number; byStatus: Record<string, number>; avgQuality: number } | null>(null);
   const [aeoSuggestions, setAeoSuggestions] = useState<AeoSuggestions | null>(null);
+  const [libraryRefreshKey, setLibraryRefreshKey] = useState(0);
+
+  /* ── Sync state → URL ── */
+  const navigate = useCallback((tab: TabKey, sub?: SubTab) => {
+    const params = new URLSearchParams();
+    params.set("tab", TAB_TO_SLUG[tab]);
+    if (tab === "AEO & SRO" && sub) params.set("sub", sub);
+    router.replace(`/?${params.toString()}`, { scroll: false });
+    setActiveTab(tab);
+    if (sub) setActiveSubTab(sub);
+  }, [router]);
+
+  /* ── URL → state on load ── */
+  useEffect(() => {
+    const tabSlug = searchParams.get("tab");
+    const subSlug = searchParams.get("sub");
+    if (tabSlug && SLUG_TO_TAB[tabSlug]) {
+      setActiveTab(SLUG_TO_TAB[tabSlug]);
+    }
+    if (subSlug) {
+      setActiveSubTab(subSlug as SubTab);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function handleAeoGenerate(suggestions: AeoSuggestions) {
     setAeoSuggestions(suggestions);
-    setActiveTab("Content Generator");
+    navigate("Content Generator");
   }
 
   useEffect(() => {
@@ -106,21 +147,58 @@ export function ContentStudioDashboard() {
           )}
         </div>
 
-        <nav className="flex-1 py-3 px-2 space-y-1 overflow-y-auto">
+        <nav className="flex-1 py-3 px-2 space-y-0.5 overflow-y-auto">
           {tabs.map((tab) => {
             const isActive = activeTab === tab;
+            const isAeo = tab === "AEO & SRO";
+            const aeoExpanded = isAeo && isActive;
             return (
-              <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                title={tab}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                  isActive ? "bg-th-sidebar-active text-th-accent" : "text-th-text-secondary hover:bg-th-sidebar-hover hover:text-th-text"
-                } ${collapsed ? "justify-center" : ""}`}
-              >
-                <span className="shrink-0">{icons[tab]}</span>
-                {!collapsed && <span className="truncate">{tab}</span>}
-              </button>
+              <div key={tab}>
+                <button
+                  onClick={() => navigate(tab)}
+                  title={tab}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                    isActive ? "bg-th-sidebar-active text-th-accent" : "text-th-text-secondary hover:bg-th-sidebar-hover hover:text-th-text"
+                  } ${collapsed ? "justify-center" : ""}`}
+                >
+                  <span className="shrink-0">{icons[tab]}</span>
+                  {!collapsed && (
+                    <>
+                      <span className="truncate flex-1">{tab}</span>
+                      {isAeo && (
+                        <svg className={`w-3.5 h-3.5 shrink-0 transition-transform ${aeoExpanded ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                        </svg>
+                      )}
+                    </>
+                  )}
+                </button>
+
+                {/* AEO sub-tree — expanded when AEO tab is active */}
+                {isAeo && aeoExpanded && !collapsed && (
+                  <div className="mt-0.5 ml-3 pl-3 border-l border-th-border space-y-3 pb-1">
+                    {NAV_GROUPS.map(({ group, items }) => (
+                      <div key={group}>
+                        <div className="px-2 py-1 text-[9px] font-semibold uppercase tracking-widest text-th-text-muted">{group}</div>
+                        {items.map(({ key, icon, label }) => (
+                          <button
+                            key={key}
+                            onClick={() => navigate("AEO & SRO", key)}
+                            className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs transition-all ${
+                              activeSubTab === key
+                                ? "bg-th-accent/10 text-th-accent font-semibold"
+                                : "text-th-text-secondary hover:bg-th-sidebar-hover hover:text-th-text"
+                            }`}
+                          >
+                            <span className="text-sm leading-none">{icon}</span>
+                            <span className="truncate">{label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             );
           })}
         </nav>
@@ -170,16 +248,16 @@ export function ContentStudioDashboard() {
         {/* All tabs stay mounted — only the active one is visible.
             This keeps generation state/SSE alive when switching tabs. */}
         <div className={`flex-1 overflow-y-auto p-6 ${activeTab === "Dashboard" ? "" : "hidden"}`}>
-          <DashboardTab onNavigate={setActiveTab} />
+          <DashboardTab onNavigate={(tab) => navigate(tab)} />
         </div>
         <div className={`flex-1 overflow-y-auto p-6 ${activeTab === "Content Generator" ? "" : "hidden"}`}>
-          <ContentGeneratorTab aeoSuggestions={aeoSuggestions} onAeoSuggestionsConsumed={() => setAeoSuggestions(null)} />
+          <ContentGeneratorTab aeoSuggestions={aeoSuggestions} onAeoSuggestionsConsumed={() => setAeoSuggestions(null)} onArticleGenerated={() => setLibraryRefreshKey(k => k + 1)} />
         </div>
         <div className={`flex-1 overflow-y-auto p-6 ${activeTab === "Content Library" ? "" : "hidden"}`}>
-          <ContentLibraryTab />
+          <ContentLibraryTab refreshKey={libraryRefreshKey} />
         </div>
         <div className={`flex-1 overflow-y-auto p-6 ${activeTab === "AEO & SRO" ? "" : "hidden"}`}>
-          <AeoTab onGenerateFromAeo={handleAeoGenerate} />
+          <AeoTab onGenerateFromAeo={handleAeoGenerate} subTab={activeSubTab} setSubTab={(sub) => navigate("AEO & SRO", sub)} />
         </div>
         <div className={`flex-1 overflow-y-auto p-6 ${activeTab === "Configuration" ? "" : "hidden"}`}>
           <ConfigurationTab />

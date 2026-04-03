@@ -1,0 +1,24 @@
+# ATLAS Pipeline — Python dependencies
+# Install: pip3 install -r requirements_atlas.txt
+
+# HTTP + scraping
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+
+# HTML content extraction — replaces readability-lxml
+# Much better at extracting clean article text from Indian .ac.in / .gov.in sites
+trafilatura>=1.12.0
+
+# HTML → markdown conversion (preserves table structure as | col | rows)
+# Gemini and Qwen read markdown tables far better than flat plain text
+markdownify>=0.13.1
+
+# You.com search API (official SDK with async support)
+youdotcom>=0.2.0
+
+# PDF extraction (placement reports, information bulletins, official PDFs)
+pdfplumber>=0.11.0
+
+# Environment variables
+python-dotenv>=1.0.0

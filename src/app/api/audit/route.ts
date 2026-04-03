@@ -173,7 +173,74 @@ export async function POST(req: NextRequest) {
     const score = Math.round((passed / checks.length) * 100);
     const schemaMentions = jsonLdBlocks.length + (html.match(/schema\.org/gi) ?? []).length;
 
-    return NextResponse.json({ url, score, checks, llmsTxtPresent: llmsRes.ok, schemaMentions, blufDensity: blufScore, pass: { llmsTxt: llmsRes.ok, schema: schemaMentions > 0, bluf: blufScore >= 0.5 } });
+    // ── SWOT + Fixes via OpenRouter ───────────────────────────────────────
+    let swot: { strengths: string[]; weaknesses: string[]; opportunities: string[]; threats: string[] } | null = null;
+    let fixes: Array<{ title: string; priority: string; impact: string; action: string }> = [];
+
+    const openrouterKey = process.env.OPENROUTER_KEY;
+    if (openrouterKey) {
+      try {
+        const passList = checks.filter(c => c.pass).map(c => `✓ ${c.label}`).join(", ");
+        const failList = checks.filter(c => !c.pass).map(c => `✗ ${c.label}: ${c.detail}`).join("\n");
+
+        const swotPrompt = `You are an AEO (Answer Engine Optimization) expert. Based on this website audit result, generate a SWOT analysis and top 3 fix recommendations.
+
+URL: ${url}
+AEO Score: ${score}/100
+Passed checks: ${passList}
+
+Failed checks:
+${failList || "None"}
+
+Return ONLY a JSON object (no other text):
+{
+  "swot": {
+    "strengths": ["strength 1", "strength 2"],
+    "weaknesses": ["weakness 1", "weakness 2"],
+    "opportunities": ["opportunity 1", "opportunity 2"],
+    "threats": ["threat 1", "threat 2"]
+  },
+  "fixes": [
+    {
+      "title": "Short fix title",
+      "priority": "high|medium|low",
+      "impact": "Estimated impact (e.g. +15-20 AEO score points)",
+      "action": "Specific 1-sentence action to take"
+    }
+  ]
+}
+
+Rules:
+- Generate exactly 2-3 items per SWOT quadrant
+- Generate exactly 3 fixes ordered by priority (highest first)
+- Base everything on the actual check results above
+- Be specific and actionable — no generic advice`;
+
+        const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${openrouterKey}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "moonshotai/kimi-k2.5",
+            messages: [{ role: "user", content: swotPrompt }],
+            max_tokens: 4000,
+            temperature: 0.2,
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
+          const text = data.choices?.[0]?.message?.content ?? "";
+          const match = text.match(/```(?:json)?\s*([\s\S]*?)```/) ?? text.match(/(\{[\s\S]*\})/);
+          try {
+            const parsed = JSON.parse(match?.[1] ?? text) as { swot?: typeof swot; fixes?: typeof fixes };
+            swot = parsed.swot ?? null;
+            fixes = parsed.fixes ?? [];
+          } catch { /* fallback: no swot/fixes */ }
+        }
+      } catch { /* swot is optional — don't fail the audit */ }
+    }
+
+    return NextResponse.json({ url, score, checks, llmsTxtPresent: llmsRes.ok, schemaMentions, blufDensity: blufScore, pass: { llmsTxt: llmsRes.ok, schema: schemaMentions > 0, bluf: blufScore >= 0.5 }, swot, fixes });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 400 });

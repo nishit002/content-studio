@@ -8,6 +8,9 @@ const PIPELINE_DIR = process.env.PIPELINE_DIR
   || path.resolve("/Volumes/NISHIT_PD/gas new/gas-split/content-generator");
 const OUTPUT_DIR = path.join(PIPELINE_DIR, "output");
 
+const ATLAS_DIR = process.env.ATLAS_DIR || path.resolve("/Volumes/NISHIT_PD/content-studio/smart-writer");
+const ATLAS_OUTPUT_DIR = path.join(ATLAS_DIR, "output");
+
 /**
  * GET /api/article?slug=scope-of-bca-in-india&part=html|meta|outline|all
  *
@@ -57,6 +60,49 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // Include ATLAS articles from smart-writer/output/runs.json
+    const atlasRunsPath = path.join(ATLAS_OUTPUT_DIR, "runs.json");
+    if (fs.existsSync(atlasRunsPath)) {
+      try {
+        const runs = JSON.parse(fs.readFileSync(atlasRunsPath, "utf-8")) as Record<string, Record<string, unknown>>;
+        for (const [, run] of Object.entries(runs)) {
+          if (run.status !== "done") continue;
+          const runDir = run.run_dir as string | undefined;
+          if (!runDir) continue;
+          const absRunDir = path.join(ATLAS_DIR, runDir);
+          const htmlPath = path.join(absRunDir, "article.html");
+          if (!fs.existsSync(htmlPath)) continue;
+          // Extract slug from run_dir: last path component
+          const dirName = path.basename(runDir);
+          // Read coherence report for word count
+          let wordCount = (run.word_count as number) || 0;
+          let coherencePassed = true;
+          const reportPath = path.join(absRunDir, "coherence_report.json");
+          if (fs.existsSync(reportPath)) {
+            try {
+              const rpt = JSON.parse(fs.readFileSync(reportPath, "utf-8"));
+              coherencePassed = rpt.passed !== false;
+            } catch { /* ignore */ }
+          }
+          articles.push({
+            slug: dirName,
+            topic: run.topic || dirName,
+            title: run.topic || dirName,
+            content_type: run.type || "atlas",
+            word_count: wordCount,
+            table_count: 0,
+            section_count: 0,
+            quality_grade: coherencePassed ? "A" : "B",
+            quality_score: coherencePassed ? 90 : 70,
+            generation_time: 0,
+            generated_at: run.finished || run.started || "",
+            has_html: true,
+            source: "atlas",
+          });
+        }
+      } catch { /* ignore malformed runs.json */ }
+    }
+
     // Sort by generated_at descending (newest first)
     articles.sort((a, b) => String(b.generated_at).localeCompare(String(a.generated_at)));
 
@@ -74,13 +120,70 @@ export async function GET(req: NextRequest) {
 
   // Sanitize slug to prevent path traversal
   const safeSlug = slug.replace(/[^a-z0-9-]/gi, "");
-  const articleDir = path.join(OUTPUT_DIR, safeSlug);
 
+  // Check content-generator output first, then ATLAS output
+  let articleDir = path.join(OUTPUT_DIR, safeSlug);
+  let isAtlasArticle = false;
   if (!fs.existsSync(articleDir)) {
-    return new Response(JSON.stringify({ error: "Article not found" }), {
-      status: 404,
-      headers: { "Content-Type": "application/json" },
-    });
+    const atlasDir = path.join(ATLAS_OUTPUT_DIR, safeSlug);
+    if (fs.existsSync(atlasDir)) {
+      articleDir = atlasDir;
+      isAtlasArticle = true;
+    } else {
+      return new Response(JSON.stringify({ error: "Article not found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  }
+
+  if (part === "sources") {
+    try {
+      const lines: string[] = [
+        `Research Sources`,
+        `Article: ${safeSlug}`,
+        `Generated: ${new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}`,
+      ];
+
+      if (isAtlasArticle) {
+        // ATLAS: read sources.json (sub-topic → url list)
+        const sourcesPath = path.join(articleDir, "sources.json");
+        if (!fs.existsSync(sourcesPath)) {
+          return new Response("No source data found for this article.", { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+        }
+        const sourcesData = JSON.parse(fs.readFileSync(sourcesPath, "utf-8")) as Record<string, string[]>;
+        const allUrls = [...new Set(Object.values(sourcesData).flat())];
+        lines.push(`Total sources: ${allUrls.length}`, "", "─────────────────────────────────────────────", "SOURCES", "─────────────────────────────────────────────", "");
+        allUrls.forEach((url, i) => lines.push(`${i + 1}. ${url}`));
+        // Also list sub-topics
+        lines.push("", "─────────────────────────────────────────────", "RESEARCH TOPICS", "─────────────────────────────────────────────", "");
+        Object.keys(sourcesData).forEach((topic, i) => lines.push(`${i + 1}. ${topic} (${sourcesData[topic].length} sources)`));
+      } else {
+        // CG: read research.json
+        const researchPath = path.join(articleDir, "research.json");
+        if (!fs.existsSync(researchPath)) {
+          return new Response("No research data found for this article.", { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+        }
+        const research = JSON.parse(fs.readFileSync(researchPath, "utf-8"));
+        const sources: { url: string; title?: string }[] = research.sources || [];
+        const queries: { query: string }[] = research.queries || [];
+        lines.push(`Total sources: ${sources.length}`, "", "─────────────────────────────────────────────", "SOURCES", "─────────────────────────────────────────────", "");
+        sources.forEach((s, i) => lines.push(`${i + 1}. ${s.title || "(no title)"}\n   ${s.url}`));
+        if (queries.length > 0) {
+          lines.push("", "─────────────────────────────────────────────", "SEARCH QUERIES USED", "─────────────────────────────────────────────", "");
+          queries.forEach((q, i) => lines.push(`${i + 1}. ${q.query}`));
+        }
+      }
+
+      return new Response(lines.join("\n"), {
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Content-Disposition": `attachment; filename="${safeSlug}-sources.txt"`,
+        },
+      });
+    } catch {
+      return new Response("Failed to read research data.", { headers: { "Content-Type": "text/plain" } });
+    }
   }
 
   if (part === "html") {
@@ -98,14 +201,45 @@ export async function GET(req: NextRequest) {
   }
 
   // Build combined response
-  const result: Record<string, unknown> = { slug: safeSlug };
+  const result: Record<string, unknown> = { slug: safeSlug, source: isAtlasArticle ? "atlas" : "cg" };
 
-  // Meta
-  const metaPath = path.join(articleDir, "meta.json");
-  if (fs.existsSync(metaPath)) {
-    try {
-      result.meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
-    } catch { result.meta = null; }
+  // Meta — for ATLAS articles, synthesize from runs.json + coherence_report.json
+  if (isAtlasArticle) {
+    const atlasRunsPath = path.join(ATLAS_OUTPUT_DIR, "runs.json");
+    let atlasMeta: Record<string, unknown> = { topic: safeSlug, content_type: "atlas" };
+    if (fs.existsSync(atlasRunsPath)) {
+      try {
+        const runs = JSON.parse(fs.readFileSync(atlasRunsPath, "utf-8")) as Record<string, Record<string, unknown>>;
+        const run = Object.values(runs).find((r) => path.basename((r.run_dir as string) || "") === safeSlug);
+        if (run) atlasMeta = { topic: run.topic, content_type: run.type, word_count: run.word_count, generated_at: run.finished || run.started };
+      } catch { /* ignore */ }
+    }
+    const reportPath = path.join(articleDir, "coherence_report.json");
+    if (fs.existsSync(reportPath)) {
+      try {
+        const rpt = JSON.parse(fs.readFileSync(reportPath, "utf-8"));
+        atlasMeta.coherence_passed = rpt.passed;
+        atlasMeta.coherence_issues = rpt.issues?.length || 0;
+        atlasMeta.major_issues = rpt.major_issues_for_review || [];
+      } catch { /* ignore */ }
+    }
+    // Extract title from H1 tag in article.html (most reliable source for ATLAS)
+    const atlasHtmlPath = path.join(articleDir, "article.html");
+    if (fs.existsSync(atlasHtmlPath)) {
+      try {
+        const atlasHtml = fs.readFileSync(atlasHtmlPath, "utf-8");
+        const h1Match = atlasHtml.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+        if (h1Match) atlasMeta.title = h1Match[1].replace(/<[^>]+>/g, "").trim();
+      } catch { /* ignore */ }
+    }
+    result.meta = atlasMeta;
+  } else {
+    const metaPath = path.join(articleDir, "meta.json");
+    if (fs.existsSync(metaPath)) {
+      try {
+        result.meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+      } catch { result.meta = null; }
+    }
   }
 
   // Outline
@@ -134,35 +268,54 @@ export async function GET(req: NextRequest) {
 }
 
 /**
- * PUT /api/article — Save edited article HTML back to disk.
+ * PUT /api/article — Save edited article HTML and/or title back to disk.
  *
- * Body: { slug, html }
+ * Body: { slug, html?, title? }
+ * At least one of html or title must be provided.
  */
 export async function PUT(req: NextRequest) {
   await getSession();
   const body = await req.json();
-  const { slug, html } = body as { slug?: string; html?: string };
+  const { slug, html, title } = body as { slug?: string; html?: string; title?: string };
 
-  if (!slug || !html) {
-    return new Response(JSON.stringify({ error: "slug and html are required" }), {
+  if (!slug || (!html && !title)) {
+    return new Response(JSON.stringify({ error: "slug and at least one of html or title are required" }), {
       status: 400,
       headers: { "Content-Type": "application/json" },
     });
   }
 
   const safeSlug = slug.replace(/[^a-z0-9-]/gi, "");
-  const articleDir = path.join(OUTPUT_DIR, safeSlug);
 
+  // Check CG dir first, then ATLAS
+  let articleDir = path.join(OUTPUT_DIR, safeSlug);
   if (!fs.existsSync(articleDir)) {
-    return new Response(JSON.stringify({ error: "Article not found" }), {
-      status: 404,
-      headers: { "Content-Type": "application/json" },
-    });
+    const atlasDir = path.join(ATLAS_OUTPUT_DIR, safeSlug);
+    if (fs.existsSync(atlasDir)) {
+      articleDir = atlasDir;
+    } else {
+      return new Response(JSON.stringify({ error: "Article not found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
   }
 
-  // Save to article.html
-  const htmlPath = path.join(articleDir, "article.html");
-  fs.writeFileSync(htmlPath, html, "utf-8");
+  if (html) {
+    fs.writeFileSync(path.join(articleDir, "article.html"), html, "utf-8");
+  }
+
+  // Update title in meta.json if provided
+  if (title) {
+    const metaPath = path.join(articleDir, "meta.json");
+    if (fs.existsSync(metaPath)) {
+      try {
+        const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+        meta.title = title;
+        fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf-8");
+      } catch { /* ignore — meta.json may not exist for ATLAS */ }
+    }
+  }
 
   return new Response(JSON.stringify({ ok: true, slug: safeSlug }), {
     headers: { "Content-Type": "application/json" },
@@ -184,13 +337,19 @@ export async function DELETE(req: NextRequest) {
   }
 
   const safeSlug = slug.replace(/[^a-z0-9-]/gi, "");
-  const articleDir = path.join(OUTPUT_DIR, safeSlug);
 
+  // Check CG dir first, then ATLAS
+  let articleDir = path.join(OUTPUT_DIR, safeSlug);
   if (!fs.existsSync(articleDir)) {
-    return new Response(JSON.stringify({ error: "Article not found" }), {
-      status: 404,
-      headers: { "Content-Type": "application/json" },
-    });
+    const atlasDir = path.join(ATLAS_OUTPUT_DIR, safeSlug);
+    if (fs.existsSync(atlasDir)) {
+      articleDir = atlasDir;
+    } else {
+      return new Response(JSON.stringify({ error: "Article not found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
   }
 
   fs.rmSync(articleDir, { recursive: true, force: true });

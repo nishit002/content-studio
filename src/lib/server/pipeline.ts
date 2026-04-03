@@ -12,6 +12,10 @@ import { getApiKeys, getConfig, getWritingRules } from "./db";
 const PIPELINE_DIR = process.env.PIPELINE_DIR
   || path.resolve("/Volumes/NISHIT_PD/gas new/gas-split/content-generator");
 
+/* ── Path to the ATLAS smart-writer module ── */
+const ATLAS_DIR = process.env.ATLAS_DIR
+  || path.resolve("/Volumes/NISHIT_PD/content-studio/smart-writer");
+
 const PYTHON_BIN = process.env.PYTHON_BIN || "/usr/bin/python3";
 
 /* ── Progress event types ── */
@@ -44,11 +48,14 @@ function buildEnv(sessionId: string): NodeJS.ProcessEnv {
     env[i === 0 ? "GEMINI_API_KEY" : `GEMINI_API_KEY_${i + 1}`] = k.key_value;
   });
 
-  // HuggingFace keys
+  // HuggingFace keys — set both HF_API_KEY (read by llm_client.py) and HF_TOKEN (HF standard)
   const hfKeys = keys.filter((k) => k.provider === "huggingface");
   hfKeys.forEach((k, i) => {
     env[i === 0 ? "HF_TOKEN" : `HF_TOKEN_${i + 1}`] = k.key_value;
+    env[i === 0 ? "HF_API_KEY" : `HF_API_KEY_${i + 1}`] = k.key_value;
   });
+  // Also pass comma-separated pool from .env.local if present
+  if (process.env.HF_API_KEYS) env.HF_API_KEYS = process.env.HF_API_KEYS;
 
   // You.com Search keys (rotation pool)
   const youKeys = keys.filter((k) => k.provider === "you_search");
@@ -347,6 +354,181 @@ export function killProcess(child: ChildProcess) {
       if (!child.killed) child.kill("SIGKILL");
     }, 5000);
   }
+}
+
+/* ── ATLAS Smart Writer Pipeline ── */
+export async function* runAtlasPipeline(
+  sessionId: string,
+  topic: string,
+  options?: { contentType?: string; force?: boolean }
+): AsyncGenerator<PipelineEvent> {
+  const env = buildEnv(sessionId);
+  env.PYTHONUNBUFFERED = "1";
+
+  // Layer in any keys from the ATLAS .env that aren't already set
+  const atlasEnvPath = path.join(ATLAS_DIR, ".env");
+  if (fs.existsSync(atlasEnvPath)) {
+    const lines = fs.readFileSync(atlasEnvPath, "utf-8").split("\n");
+    for (const line of lines) {
+      const m = line.match(/^([A-Z0-9_]+)=(.*)$/);
+      if (m && !env[m[1]]) env[m[1]] = m[2].trim();
+    }
+  }
+
+  // Map content-studio article types to ATLAS content types
+  const atlasTypeMap: Record<string, string> = {
+    college_profile:   "college_profile",
+    college_placement: "college_placement",
+    exam_guide:        "exam",
+    ranking_list:      "ranking",
+    career_guide:      "career",
+  };
+  const contentType = atlasTypeMap[options?.contentType || ""] || "college_placement";
+
+  const args = ["atlas.py", topic, "--type", contentType, "--use-you-research"];
+  if (options?.force) args.push("--force");
+
+  yield { stage: "queued", message: `Starting ATLAS pipeline for: ${topic}`, timestamp: Date.now() };
+  yield { stage: "classifying", message: "Building topic blueprint...", timestamp: Date.now() };
+
+  const child: ChildProcess = spawn(PYTHON_BIN, args, {
+    cwd: ATLAS_DIR,
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  const lineQueue: string[] = [];
+  let done = false;
+  let exitCode: number | null = null;
+  let stderrBuffer = "";
+
+  const processStream = (stream: NodeJS.ReadableStream) => {
+    let buffer = "";
+    stream.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) lineQueue.push(line);
+    });
+    stream.on("end", () => { if (buffer) lineQueue.push(buffer); });
+  };
+
+  if (child.stdout) processStream(child.stdout);
+  if (child.stderr) {
+    let buf = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stderrBuffer += text;
+      buf += text;
+      const lines = buf.split("\n");
+      buf = lines.pop() || "";
+      for (const line of lines) lineQueue.push(line);
+    });
+    child.stderr.on("end", () => { if (buf) lineQueue.push(buf); });
+  }
+
+  child.on("close", (code) => { exitCode = code; done = true; });
+  child.on("error", (err) => { lineQueue.push(`✗ Error: ${err.message}`); done = true; });
+
+  let lastYield = Date.now();
+  let lastKnownStage: PipelineStage = "classifying";
+
+  while (!done || lineQueue.length > 0) {
+    if (lineQueue.length > 0) {
+      const line = lineQueue.shift()!;
+      const event = parseAtlasLine(line);
+      if (event) {
+        yield event;
+        lastYield = Date.now();
+        lastKnownStage = event.stage;
+      }
+    } else {
+      if (Date.now() - lastYield > 15000) {
+        yield { stage: lastKnownStage, message: "Pipeline running...", timestamp: Date.now() };
+        lastYield = Date.now();
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+
+  if (exitCode !== 0 && exitCode !== null) {
+    const errLines = stderrBuffer.split("\n").filter((l) => l.trim());
+    const lastErr = errLines[errLines.length - 1] || `Process exited with code ${exitCode}`;
+    yield { stage: "error", message: lastErr, timestamp: Date.now() };
+  }
+}
+
+function parseAtlasLine(line: string): PipelineEvent | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  const ts = Date.now();
+
+  // Stage header: "  Stage N/11 — Name"
+  const stageMatch = trimmed.match(/Stage\s+(\d+)\/11\s*[—\-]+\s*(.+)/);
+  if (stageMatch) {
+    const n = parseInt(stageMatch[1]);
+    const name = stageMatch[2].trim();
+    let stage: PipelineStage = "classifying";
+    if (n <= 2)      stage = "classifying";
+    else if (n <= 5) stage = "researching";
+    else if (n === 7) stage = "outlining";
+    else if (n <= 9) stage = "writing";
+    else             stage = "post_processing";
+    return { stage, message: `Stage ${n}: ${name}`, timestamp: ts };
+  }
+
+  // Section written: "Stage 8 [3]: writing: Some Heading"
+  if (trimmed.includes("Stage 8") && trimmed.includes("writing:")) {
+    return { stage: "writing", message: trimmed.replace(/^\S+\s+/, ""), timestamp: ts };
+  }
+
+  // Sections complete: "Stage 8: N sections written, N total words"
+  if (trimmed.includes("Stage 8:") && trimmed.includes("sections written")) {
+    return { stage: "writing", message: trimmed.replace(/^.*Stage 8:\s*/, ""), timestamp: ts };
+  }
+
+  // Coherence: "Stage 10: article saved — N words, READY/NEEDS REVIEW"
+  if (trimmed.includes("article saved") && trimmed.includes("words")) {
+    const wMatch = trimmed.match(/(\d+)\s*words/);
+    const ready = !trimmed.includes("NEEDS REVIEW");
+    return {
+      stage: "done",
+      message: trimmed.replace(/^.*Stage 10:\s*/, ""),
+      detail: { wordCount: wMatch ? Number(wMatch[1]) : 0, coherencePassed: ready },
+      timestamp: ts,
+    };
+  }
+
+  // Proofread done: "Stage 11: N paragraphs corrected"
+  if (trimmed.includes("Stage 11:") && trimmed.includes("paragraphs")) {
+    return { stage: "post_processing", message: trimmed.replace(/^.*Stage 11:\s*/, ""), timestamp: ts };
+  }
+
+  // Output path from summary: "  Output:   output/006-slug/article.html"
+  const outputMatch = trimmed.match(/Output:\s+(output\/[^\s]+\/article\.html)/);
+  if (outputMatch) {
+    const relPath = outputMatch[1];
+    const articlePath = path.join(ATLAS_DIR, relPath);
+    // Extract slug: the directory between output/ and /article.html
+    const slugMatch = relPath.match(/output\/([^/]+)\/article\.html/);
+    return {
+      stage: "done",
+      message: articlePath,
+      detail: { articlePath, atlasSlug: slugMatch?.[1] },
+      timestamp: ts,
+    };
+  }
+
+  // Error — startsWith("✗") catches errors pushed directly to queue;
+  // "Pipeline failed" catches Python-level failures; "error:" catches exception traces.
+  // Deliberately NOT trimmed.includes("✗") because INFO log lines contain "→ ✗ entity mismatch"
+  // which are informational recovery messages, not pipeline failures.
+  if (trimmed.startsWith("✗") || trimmed.includes("Pipeline failed") ||
+      (trimmed.toLowerCase().includes("error:") && !trimmed.includes("ERROR: 0"))) {
+    return { stage: "error", message: trimmed.replace(/^\s*✗\s*/, ""), timestamp: ts };
+  }
+
+  return null;
 }
 
 /* ── News Article Generation Pipeline ── */

@@ -182,6 +182,84 @@ function migrate(db: Database.Database) {
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
 
+    -- AEO Brand Config (one row per session)
+    CREATE TABLE IF NOT EXISTS aeo_brand_config (
+      session_id TEXT PRIMARY KEY,
+      brand_name TEXT NOT NULL DEFAULT '',
+      aliases TEXT NOT NULL DEFAULT '',
+      website TEXT NOT NULL DEFAULT '',
+      industry TEXT NOT NULL DEFAULT '',
+      keywords TEXT NOT NULL DEFAULT '',
+      description TEXT NOT NULL DEFAULT '',
+      competitors TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    -- AEO Tracking Prompts
+    CREATE TABLE IF NOT EXISTS aeo_prompts (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      prompt_text TEXT NOT NULL,
+      volume_data TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    -- AEO Scrape Runs (one row per provider × prompt execution)
+    CREATE TABLE IF NOT EXISTS aeo_runs (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      prompt_text TEXT NOT NULL,
+      answer TEXT NOT NULL DEFAULT '',
+      sources_json TEXT NOT NULL DEFAULT '[]',
+      visibility_score INTEGER NOT NULL DEFAULT 0,
+      sentiment TEXT NOT NULL DEFAULT 'neutral',
+      brand_mentioned INTEGER NOT NULL DEFAULT 0,
+      competitors_json TEXT NOT NULL DEFAULT '[]',
+      snapshot_id TEXT DEFAULT '',
+      accuracy_flags TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    -- AEO Battlecards
+    CREATE TABLE IF NOT EXISTS aeo_battlecards (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      competitor TEXT NOT NULL,
+      summary TEXT NOT NULL DEFAULT '',
+      sections_json TEXT NOT NULL DEFAULT '[]',
+      sentiment TEXT NOT NULL DEFAULT 'neutral',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    -- AEO Schedule settings (one row per session)
+    CREATE TABLE IF NOT EXISTS aeo_schedule (
+      session_id TEXT PRIMARY KEY,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      interval_ms INTEGER NOT NULL DEFAULT 86400000,
+      last_run_at TEXT DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    -- AEO Drift Alerts
+    CREATE TABLE IF NOT EXISTS aeo_drift_alerts (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      prompt_text TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      old_score INTEGER NOT NULL DEFAULT 0,
+      new_score INTEGER NOT NULL DEFAULT 0,
+      delta INTEGER NOT NULL DEFAULT 0,
+      dismissed INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
     -- Indexes
     CREATE INDEX IF NOT EXISTS idx_content_session ON content(session_id);
     CREATE INDEX IF NOT EXISTS idx_content_status ON content(session_id, status);
@@ -193,7 +271,49 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_analytics_conn ON analytics_connections(session_id);
     CREATE INDEX IF NOT EXISTS idx_analytics_cache ON analytics_cache(session_id, provider);
     CREATE INDEX IF NOT EXISTS idx_aeo_audits_session ON aeo_audits(session_id);
+    CREATE INDEX IF NOT EXISTS idx_aeo_prompts_session ON aeo_prompts(session_id);
+    CREATE INDEX IF NOT EXISTS idx_aeo_runs_session ON aeo_runs(session_id);
+    CREATE INDEX IF NOT EXISTS idx_aeo_runs_provider ON aeo_runs(session_id, provider);
+    CREATE INDEX IF NOT EXISTS idx_aeo_battlecards_session ON aeo_battlecards(session_id);
+    CREATE INDEX IF NOT EXISTS idx_aeo_drift_session ON aeo_drift_alerts(session_id);
+
+    -- Bulk generation run history
+    CREATE TABLE IF NOT EXISTS bulk_runs (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      name TEXT NOT NULL DEFAULT '',
+      status TEXT DEFAULT 'running',
+      total INTEGER DEFAULT 0,
+      done INTEGER DEFAULT 0,
+      failed INTEGER DEFAULT 0,
+      total_words INTEGER DEFAULT 0,
+      items_json TEXT DEFAULT '[]',
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at TEXT,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_bulk_runs_session ON bulk_runs(session_id);
+
+    -- AEO Competitor Research (URL-based keyword intelligence, cached per domain)
+    CREATE TABLE IF NOT EXISTS aeo_competitor_research (
+      session_id TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      data_json TEXT NOT NULL DEFAULT '{}',
+      analyzed_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (session_id, domain),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_aeo_competitor_research ON aeo_competitor_research(session_id);
   `);
+
+  // Column migrations — ADD COLUMN is idempotent via try/catch (SQLite has no IF NOT EXISTS for columns)
+  const colMigrations = [
+    "ALTER TABLE aeo_prompts ADD COLUMN volume_data TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE aeo_runs ADD COLUMN accuracy_flags TEXT NOT NULL DEFAULT ''",
+  ];
+  for (const sql of colMigrations) {
+    try { db.exec(sql); } catch { /* column already exists — safe to ignore */ }
+  }
 }
 
 /* ── Config helpers ── */
@@ -471,4 +591,226 @@ export function getAuditHistory(sessionId: string, limit = 20) {
   return db
     .prepare("SELECT id, audit_type, url, keyword, score, created_at FROM aeo_audits WHERE session_id = ? ORDER BY created_at DESC LIMIT ?")
     .all(sessionId, limit) as { id: string; audit_type: string; url: string; keyword: string; score: number; created_at: string }[];
+}
+
+/* ── AEO Brand Config ── */
+export interface AeoBrandConfig { brandName: string; aliases: string; website: string; industry: string; keywords: string; description: string; competitors: string; }
+
+export function getAeoBrandConfig(sessionId: string): AeoBrandConfig {
+  const db = getDb();
+  const row = db.prepare("SELECT * FROM aeo_brand_config WHERE session_id = ?").get(sessionId) as Record<string, string> | undefined;
+  return { brandName: row?.brand_name ?? "", aliases: row?.aliases ?? "", website: row?.website ?? "", industry: row?.industry ?? "", keywords: row?.keywords ?? "", description: row?.description ?? "", competitors: row?.competitors ?? "" };
+}
+
+export function setAeoBrandConfig(sessionId: string, c: AeoBrandConfig) {
+  getDb().prepare("INSERT OR REPLACE INTO aeo_brand_config (session_id, brand_name, aliases, website, industry, keywords, description, competitors, updated_at) VALUES (?,?,?,?,?,?,?,?,datetime('now'))")
+    .run(sessionId, c.brandName, c.aliases, c.website, c.industry, c.keywords, c.description, c.competitors);
+}
+
+/* ── AEO Prompts ── */
+export interface AeoPrompt { id: string; promptText: string; volumeData: string; createdAt: string; }
+
+export function getAeoPrompts(sessionId: string): AeoPrompt[] {
+  return (getDb().prepare("SELECT id, prompt_text, COALESCE(volume_data,'') as volume_data, created_at FROM aeo_prompts WHERE session_id = ? ORDER BY created_at ASC").all(sessionId) as { id: string; prompt_text: string; volume_data: string; created_at: string }[]).map(r => ({ id: r.id, promptText: r.prompt_text, volumeData: r.volume_data, createdAt: r.created_at }));
+}
+
+export function updatePromptVolume(sessionId: string, id: string, volumeData: string) {
+  getDb().prepare("UPDATE aeo_prompts SET volume_data = ? WHERE session_id = ? AND id = ?").run(volumeData, sessionId, id);
+}
+
+export function addAeoPrompt(sessionId: string, id: string, promptText: string) {
+  getDb().prepare("INSERT OR IGNORE INTO aeo_prompts (id, session_id, prompt_text) VALUES (?,?,?)").run(id, sessionId, promptText);
+}
+
+export function deleteAeoPrompt(sessionId: string, id: string) {
+  getDb().prepare("DELETE FROM aeo_prompts WHERE session_id = ? AND id = ?").run(sessionId, id);
+}
+
+/* ── AEO Runs ── */
+export interface AeoRun { id: string; provider: string; promptText: string; answer: string; sources: string[]; visibilityScore: number; sentiment: string; brandMentioned: boolean; competitors: string[]; snapshotId: string; accuracyFlags: string; createdAt: string; }
+
+export function saveAeoRun(sessionId: string, run: AeoRun) {
+  getDb().prepare("INSERT OR REPLACE INTO aeo_runs (id, session_id, provider, prompt_text, answer, sources_json, visibility_score, sentiment, brand_mentioned, competitors_json, snapshot_id, accuracy_flags, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    .run(run.id, sessionId, run.provider, run.promptText, run.answer, JSON.stringify(run.sources), run.visibilityScore, run.sentiment, run.brandMentioned ? 1 : 0, JSON.stringify(run.competitors), run.snapshotId, run.accuracyFlags ?? "", run.createdAt);
+}
+
+export function getAeoRuns(sessionId: string, limit = 200): AeoRun[] {
+  return (getDb().prepare("SELECT * FROM aeo_runs WHERE session_id = ? ORDER BY created_at DESC LIMIT ?").all(sessionId, limit) as Record<string, unknown>[]).map(r => ({
+    id: r.id as string, provider: r.provider as string, promptText: r.prompt_text as string, answer: r.answer as string,
+    sources: JSON.parse(r.sources_json as string) as string[], visibilityScore: r.visibility_score as number,
+    sentiment: r.sentiment as string, brandMentioned: (r.brand_mentioned as number) === 1,
+    competitors: JSON.parse(r.competitors_json as string) as string[], snapshotId: r.snapshot_id as string,
+    accuracyFlags: (r.accuracy_flags as string) ?? "", createdAt: r.created_at as string,
+  }));
+}
+
+export function updateRunAccuracy(sessionId: string, id: string, accuracyFlags: string) {
+  getDb().prepare("UPDATE aeo_runs SET accuracy_flags = ? WHERE session_id = ? AND id = ?").run(accuracyFlags, sessionId, id);
+}
+
+export function deleteAeoRun(sessionId: string, id: string) {
+  getDb().prepare("DELETE FROM aeo_runs WHERE session_id = ? AND id = ?").run(sessionId, id);
+}
+
+export function clearAeoRuns(sessionId: string) {
+  getDb().prepare("DELETE FROM aeo_runs WHERE session_id = ?").run(sessionId);
+}
+
+/* ── AEO Battlecards ── */
+export interface AeoBattlecard { id: string; competitor: string; summary: string; sections: { title: string; content: string }[]; sentiment: string; createdAt: string; }
+
+export function getAeoBattlecards(sessionId: string): AeoBattlecard[] {
+  return (getDb().prepare("SELECT * FROM aeo_battlecards WHERE session_id = ? ORDER BY created_at DESC").all(sessionId) as Record<string, unknown>[]).map(r => ({
+    id: r.id as string, competitor: r.competitor as string, summary: r.summary as string,
+    sections: JSON.parse(r.sections_json as string) as { title: string; content: string }[], sentiment: r.sentiment as string, createdAt: r.created_at as string,
+  }));
+}
+
+export function saveAeoBattlecard(sessionId: string, card: AeoBattlecard) {
+  getDb().prepare("INSERT OR REPLACE INTO aeo_battlecards (id, session_id, competitor, summary, sections_json, sentiment, created_at) VALUES (?,?,?,?,?,?,?)")
+    .run(card.id, sessionId, card.competitor, card.summary, JSON.stringify(card.sections), card.sentiment, card.createdAt);
+}
+
+export function deleteAeoBattlecard(sessionId: string, id: string) {
+  getDb().prepare("DELETE FROM aeo_battlecards WHERE session_id = ? AND id = ?").run(sessionId, id);
+}
+
+/* ── AEO Schedule ── */
+export interface AeoSchedule { enabled: boolean; intervalMs: number; lastRunAt: string; }
+
+export function getAeoSchedule(sessionId: string): AeoSchedule {
+  const r = getDb().prepare("SELECT * FROM aeo_schedule WHERE session_id = ?").get(sessionId) as Record<string, unknown> | undefined;
+  return { enabled: (r?.enabled as number) === 1, intervalMs: (r?.interval_ms as number) ?? 86400000, lastRunAt: (r?.last_run_at as string) ?? "" };
+}
+
+export function setAeoSchedule(sessionId: string, s: AeoSchedule) {
+  getDb().prepare("INSERT OR REPLACE INTO aeo_schedule (session_id, enabled, interval_ms, last_run_at, updated_at) VALUES (?,?,?,?,datetime('now'))")
+    .run(sessionId, s.enabled ? 1 : 0, s.intervalMs, s.lastRunAt);
+}
+
+/* ── AEO Drift Alerts ── */
+export interface AeoDriftAlert { id: string; promptText: string; provider: string; oldScore: number; newScore: number; delta: number; dismissed: boolean; createdAt: string; }
+
+export function getAeoDriftAlerts(sessionId: string): AeoDriftAlert[] {
+  return (getDb().prepare("SELECT * FROM aeo_drift_alerts WHERE session_id = ? ORDER BY created_at DESC LIMIT 50").all(sessionId) as Record<string, unknown>[]).map(r => ({
+    id: r.id as string, promptText: r.prompt_text as string, provider: r.provider as string,
+    oldScore: r.old_score as number, newScore: r.new_score as number, delta: r.delta as number,
+    dismissed: (r.dismissed as number) === 1, createdAt: r.created_at as string,
+  }));
+}
+
+export function saveAeoDriftAlert(sessionId: string, a: AeoDriftAlert) {
+  getDb().prepare("INSERT OR REPLACE INTO aeo_drift_alerts (id, session_id, prompt_text, provider, old_score, new_score, delta, dismissed, created_at) VALUES (?,?,?,?,?,?,?,?,?)")
+    .run(a.id, sessionId, a.promptText, a.provider, a.oldScore, a.newScore, a.delta, a.dismissed ? 1 : 0, a.createdAt);
+}
+
+export function dismissAeoDriftAlert(sessionId: string, id: string) {
+  getDb().prepare("UPDATE aeo_drift_alerts SET dismissed = 1 WHERE session_id = ? AND id = ?").run(sessionId, id);
+}
+
+/* ── AEO Competitor Research ── */
+export interface CompetitorKeyword {
+  text: string;
+  type: "organic" | "ai_prompt";
+  volume: number | null;
+  trend: string;
+  tracked: boolean;
+}
+export interface CompetitorResearchResult {
+  id: string;
+  domain: string;
+  url: string;
+  industry: string;
+  brand: string;
+  keywords: CompetitorKeyword[];
+  totalVolume: number;
+  analyzedAt: string;
+  warning?: string;
+}
+export interface CompetitorResearchSummary {
+  domain: string;
+  brand: string;
+  totalVolume: number;
+  keywordCount: number;
+  analyzedAt: string;
+}
+
+export function saveCompetitorResearch(sessionId: string, domain: string, data: CompetitorResearchResult) {
+  getDb().prepare("INSERT OR REPLACE INTO aeo_competitor_research (session_id, domain, data_json, analyzed_at) VALUES (?,?,?,datetime('now'))")
+    .run(sessionId, domain, JSON.stringify(data));
+}
+
+export function getCompetitorResearch(sessionId: string, domain: string): CompetitorResearchResult | null {
+  const row = getDb().prepare("SELECT data_json FROM aeo_competitor_research WHERE session_id = ? AND domain = ?")
+    .get(sessionId, domain) as { data_json: string } | undefined;
+  if (!row) return null;
+  try { return JSON.parse(row.data_json) as CompetitorResearchResult; } catch { return null; }
+}
+
+export function listCompetitorResearch(sessionId: string): CompetitorResearchSummary[] {
+  const rows = getDb().prepare("SELECT domain, analyzed_at, data_json FROM aeo_competitor_research WHERE session_id = ? ORDER BY analyzed_at DESC")
+    .all(sessionId) as { domain: string; analyzed_at: string; data_json: string }[];
+  return rows.map(r => {
+    try {
+      const d = JSON.parse(r.data_json) as CompetitorResearchResult;
+      return { domain: r.domain, brand: d.brand || r.domain, totalVolume: d.totalVolume, keywordCount: d.keywords.length, analyzedAt: r.analyzed_at };
+    } catch { return { domain: r.domain, brand: r.domain, totalVolume: 0, keywordCount: 0, analyzedAt: r.analyzed_at }; }
+  });
+}
+
+export function deleteCompetitorResearch(sessionId: string, domain: string) {
+  getDb().prepare("DELETE FROM aeo_competitor_research WHERE session_id = ? AND domain = ?").run(sessionId, domain);
+}
+
+/* ── Bulk Run helpers ── */
+export interface BulkRunRow {
+  id: string;
+  name: string;
+  status: string;
+  total: number;
+  done: number;
+  failed: number;
+  total_words: number;
+  started_at: string;
+  completed_at: string | null;
+}
+
+export function createBulkRun(sessionId: string, name: string, total: number): string {
+  const { randomUUID } = require("crypto") as typeof import("crypto");
+  const id = randomUUID();
+  getDb().prepare("INSERT INTO bulk_runs (id, session_id, name, status, total) VALUES (?,?,?,'running',?)").run(id, sessionId, name, total);
+  return id;
+}
+
+export function updateBulkRun(
+  id: string,
+  updates: { status?: string; done?: number; failed?: number; totalWords?: number; items?: unknown[]; completedAt?: string }
+) {
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  if (updates.status !== undefined) { sets.push("status = ?"); vals.push(updates.status); }
+  if (updates.done !== undefined) { sets.push("done = ?"); vals.push(updates.done); }
+  if (updates.failed !== undefined) { sets.push("failed = ?"); vals.push(updates.failed); }
+  if (updates.totalWords !== undefined) { sets.push("total_words = ?"); vals.push(updates.totalWords); }
+  if (updates.items !== undefined) { sets.push("items_json = ?"); vals.push(JSON.stringify(updates.items)); }
+  if (updates.completedAt !== undefined) { sets.push("completed_at = ?"); vals.push(updates.completedAt); }
+  if (sets.length === 0) return;
+  vals.push(id);
+  getDb().prepare(`UPDATE bulk_runs SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+}
+
+export function listBulkRuns(sessionId: string): BulkRunRow[] {
+  return getDb()
+    .prepare("SELECT id, name, status, total, done, failed, total_words, started_at, completed_at FROM bulk_runs WHERE session_id = ? ORDER BY started_at DESC LIMIT 50")
+    .all(sessionId) as BulkRunRow[];
+}
+
+export function getBulkRun(sessionId: string, id: string): (BulkRunRow & { items_json: string }) | null {
+  return getDb()
+    .prepare("SELECT id, name, status, total, done, failed, total_words, started_at, completed_at, items_json FROM bulk_runs WHERE id = ? AND session_id = ?")
+    .get(id, sessionId) as (BulkRunRow & { items_json: string }) | null;
+}
+
+export function deleteBulkRun(sessionId: string, id: string) {
+  getDb().prepare("DELETE FROM bulk_runs WHERE id = ? AND session_id = ?").run(id, sessionId);
 }

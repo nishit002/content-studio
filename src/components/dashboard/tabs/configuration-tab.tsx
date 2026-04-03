@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { apiProviders, industryPresets } from "../types";
 
-type ConfigSection = "project" | "api_keys" | "writing_rules" | "presets";
+type ConfigSection = "project" | "api_keys" | "writing_rules" | "presets" | "brand_aeo";
 
 interface ApiKeyEntry {
   provider: string;
@@ -105,6 +105,11 @@ export function ConfigurationTab() {
       label: "Industry Presets",
       icon: <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 9.776c.112-.017.227-.026.344-.026h15.812c.117 0 .232.009.344.026m-16.5 0a2.25 2.25 0 00-1.883 2.542l.857 6a2.25 2.25 0 002.227 1.932H19.05a2.25 2.25 0 002.227-1.932l.857-6a2.25 2.25 0 00-1.883-2.542m-16.5 0V6A2.25 2.25 0 016 3.75h12A2.25 2.25 0 0120.25 6v3.776" /></svg>,
     },
+    {
+      id: "brand_aeo",
+      label: "Brand & AEO",
+      icon: <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" /></svg>,
+    },
   ];
 
   return (
@@ -138,6 +143,7 @@ export function ConfigurationTab() {
         {section === "api_keys" && <ApiKeysSection keys={apiKeys} onKeysChange={setApiKeys} />}
         {section === "writing_rules" && <WritingRulesSection rules={rules} onSave={saveRules} saving={saving} />}
         {section === "presets" && <PresetsSection config={config} onApply={saveConfig} />}
+        {section === "brand_aeo" && <BrandAeoSection />}
       </div>
     </div>
   );
@@ -900,5 +906,153 @@ function Toggle({ label, value, onChange }: { label: string; value: boolean; onC
       </div>
       <span className="text-xs text-th-text-secondary">{label}</span>
     </label>
+  );
+}
+
+/* ═══════════════════════════════════════ */
+/* ── BRAND & AEO SECTION ── */
+/* ═══════════════════════════════════════ */
+
+interface AeoBrandConfig {
+  brandName: string; aliases: string; website: string;
+  industry: string; keywords: string; description: string; competitors: string;
+}
+
+const FMC_DEFAULTS: AeoBrandConfig = {
+  brandName: "FindMyCollege",
+  aliases: "FMC, findmycollege.com",
+  website: "https://findmycollege.com",
+  industry: "EdTech, College Admissions, Higher Education",
+  keywords: "top MBA colleges India, best engineering colleges, NIRF ranking, college fees, admission process, college cutoffs, top universities India",
+  description: "FindMyCollege is India's leading college discovery and comparison platform, helping students find the best colleges for MBA, Engineering, Medical, Law, and other programs based on rankings, fees, placements, and admission requirements.",
+  competitors: "Shiksha, Collegedunia, Careers360, CollegeDekho, GetMyUni",
+};
+
+function BrandAeoSection() {
+  const [cfg, setCfg] = useState<AeoBrandConfig>(FMC_DEFAULTS);
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState("");
+
+  useEffect(() => {
+    fetch("/api/aeo/config")
+      .then(r => r.json())
+      .then((d: AeoBrandConfig) => {
+        // Only override defaults if the user has actually saved something
+        if (d.brandName?.trim()) setCfg(d);
+        setLoaded(true);
+      })
+      .catch(() => setLoaded(true));
+  }, []);
+
+  async function save() {
+    setSaving(true);
+    try {
+      await fetch("/api/aeo/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cfg),
+      });
+      setSaveMsg("Saved");
+      setTimeout(() => setSaveMsg(""), 2500);
+    } catch {
+      setSaveMsg("Error saving");
+    }
+    setSaving(false);
+  }
+
+  if (!loaded) return <div className="flex items-center justify-center h-32"><div className="w-6 h-6 rounded-full border-2 border-th-accent border-t-transparent animate-spin" /></div>;
+
+  const cfgField = (label: string, key: keyof AeoBrandConfig, placeholder: string, multiline?: boolean, hint?: string) => (
+    <div className="space-y-1">
+      <label className="text-xs font-medium text-th-text-secondary block">{label}</label>
+      {hint && <p className="text-xs text-th-text-muted">{hint}</p>}
+      {multiline ? (
+        <textarea
+          value={cfg[key]}
+          onChange={e => setCfg(p => ({ ...p, [key]: e.target.value }))}
+          placeholder={placeholder}
+          rows={3}
+          className="cs-input w-full resize-y"
+        />
+      ) : (
+        <input
+          value={cfg[key]}
+          onChange={e => setCfg(p => ({ ...p, [key]: e.target.value }))}
+          placeholder={placeholder}
+          className="cs-input"
+        />
+      )}
+    </div>
+  );
+
+  const isComplete = cfg.brandName.trim() && cfg.website.trim() && cfg.keywords.trim();
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h3 className="text-base font-semibold text-th-text">Brand & AEO Settings</h3>
+        <p className="text-sm text-th-text-muted mt-1">
+          These details power the entire AEO & SRO tab — visibility scoring, battlecards, prompt tracking, and competitor analysis. Pre-filled with FindMyCollege defaults.
+        </p>
+      </div>
+
+      {/* Status chips */}
+      <div className="flex flex-wrap gap-2">
+        {[
+          { label: "Brand Name", ok: !!cfg.brandName.trim() },
+          { label: "Website", ok: !!cfg.website.trim() },
+          { label: "Keywords", ok: !!cfg.keywords.trim() },
+          { label: "Competitors", ok: !!cfg.competitors.trim() },
+          { label: "Description", ok: !!cfg.description.trim() },
+        ].map(({ label, ok }) => (
+          <span key={label} className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium ${ok ? "bg-green-500/10 border-green-500/20 text-green-400" : "bg-th-card-alt border-th-border text-th-text-muted"}`}>
+            <span>{ok ? "✓" : "○"}</span>{label}
+          </span>
+        ))}
+      </div>
+
+      {/* Identity */}
+      <div>
+        <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-th-text-muted">Brand Identity</div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          {cfgField("Brand / Company Name", "brandName", "FindMyCollege", false, "Used as the primary term in visibility scoring")}
+          {cfgField("Brand Aliases (comma-separated)", "aliases", "FMC, findmycollege.com", false, "Alternative names, domain, abbreviations")}
+          {cfgField("Website URL", "website", "https://findmycollege.com")}
+          {cfgField("Industry / Vertical", "industry", "EdTech, College Admissions")}
+        </div>
+      </div>
+
+      {/* Tracking */}
+      <div>
+        <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-th-text-muted">Tracking & Analysis</div>
+        <div className="grid gap-4">
+          {cfgField("Target Keywords (comma-separated)", "keywords", "top MBA colleges India, NIRF ranking, college fees…", false, "Keywords used to generate niche prompts and contextualize responses")}
+          {cfgField("Competitors (comma-separated)", "competitors", "Shiksha, Collegedunia, Careers360…", false, "Used for battlecard generation and citation opportunity analysis")}
+          {cfgField("Brand Description", "description", "Brief description of your product/service…", true, "Gives AI models context when assessing relevance of responses")}
+        </div>
+      </div>
+
+      {/* Save */}
+      <div className="flex items-center gap-3 pt-2 border-t border-th-border">
+        <button
+          onClick={save}
+          disabled={saving || !isComplete}
+          className="cs-btn cs-btn-primary"
+        >
+          {saving ? "Saving…" : "Save Brand Settings"}
+        </button>
+        {!isComplete && <span className="text-xs text-th-text-muted">Fill in Brand Name, Website, and Keywords to save.</span>}
+        {saveMsg && (
+          <span className={`text-xs font-medium ${saveMsg === "Saved" ? "text-green-400" : "text-red-400"}`}>{saveMsg}</span>
+        )}
+      </div>
+
+      {/* Usage note */}
+      <div className="rounded-lg border border-th-border bg-th-card-alt px-4 py-3 text-xs text-th-text-muted leading-relaxed">
+        <strong className="text-th-text">Where these settings are used:</strong>
+        {" "}Visibility scores in Responses & Analytics (brand mention detection) · Battlecard generation (competitor comparison) · Niche Explorer & Fan-Out (context for prompt generation) · Drift alerts (score change detection between runs)
+      </div>
+    </div>
   );
 }

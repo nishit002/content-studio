@@ -9,6 +9,20 @@ export interface AuditCheck {
   detail: string;
 }
 
+export interface AuditSwot {
+  strengths: string[];
+  weaknesses: string[];
+  opportunities: string[];
+  threats: string[];
+}
+
+export interface AuditFix {
+  title: string;
+  priority: string;
+  impact: string;
+  action: string;
+}
+
 export interface AuditReport {
   url: string;
   score: number;
@@ -21,6 +35,8 @@ export interface AuditReport {
     schema: boolean;
     bluf: boolean;
   };
+  swot?: AuditSwot | null;
+  fixes?: AuditFix[];
 }
 
 // ─── Gemini Grounding Types ───────────────────────────────────────────────
