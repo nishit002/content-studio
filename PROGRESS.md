@@ -2,8 +2,65 @@
 
 ## NEXT — Start here next session
 
-**Task 1 (data upload) is DONE. Tasks 2 and 3 below are still pending.**
+**Tasks 2 and 3 from the EC2 data upgrade are still pending.**
 Read from "### Task 2" below — that is the next thing to do.
+
+---
+
+## DONE — ATLAS bug fixes + UI improvements (2026-04-06 session 3)
+Status: **COMPLETE. All fixes deployed to EC2.**
+
+### Bugs fixed this session
+
+**Article open crash (content-library-tab + content-generator-tab)**
+- `meta.content_type.replace("_", " ")` crashed when ATLAS articles had `content_type = undefined`
+- `meta.word_count.toLocaleString()` same issue
+- Fix: guarded all meta field accesses with `!= null` checks
+- Also made `cleanArticleHtml()` null-safe (accepts `string | null | undefined`)
+- Files: `content-library-tab.tsx`, `content-generator-tab.tsx`
+
+**ATLAS: Blueprint missing `article_type` field**
+- `Blueprint` dataclass in `models.py` was missing `article_type` field
+- `_parse_blueprint()` in `stage1_blueprint.py` didn't pass `article_type` when building the object
+- Stage 7 (`stage7_outline.py`) accessed `blueprint.article_type` → crash
+- Fix: added field to dataclass + passed it in `_parse_blueprint`
+- Files: `smart-writer/models.py`, `smart-writer/stage1_blueprint.py`
+
+**ATLAS: OUTLINE_PROMPT format crash**
+- `OUTLINE_PROMPT` in `stage7_outline.py` had `{entity}`, `{year}`, `{exam}` etc. as literal
+  example text in the prompt, but Python's `.format()` treated them as placeholders → crash
+- Error: "Replacement index 0 out of range for positional args tuple"
+- Fix: replaced all `{placeholder}` examples with plain `PLACEHOLDER` text
+- File: `smart-writer/stage7_outline.py`
+
+**ATLAS: Stage 7 token limit → truncated JSON**
+- Gemini was returning truncated outline JSON (cut off at ~922 chars) because `max_tokens=8192`
+  was too low for a large outline prompt + response
+- Fix: increased `max_tokens` 8192 → 16000 for Stage 7 call
+- Also added 3x retry logic to `GeminiClient.generate_json()` for any JSON parse failure
+- Files: `smart-writer/stage7_outline.py`, `smart-writer/llm_client.py`
+
+**CG processes killed (user request)**
+- Two CG `write` processes were running alongside ATLAS for the same topic
+- Killed PIDs 20182 and 20192 — ATLAS process left running
+
+### New feature: ATLAS Restart button
+- Failed ATLAS articles in Content Library now show an orange **"↺ Restart"** button
+- Clicking it calls `POST /api/atlas/restart` which spawns `atlas.py` detached (fire-and-forget)
+- atlas.py auto-resumes the failed run from the last successful checkpoint
+- Files: `src/app/api/atlas/restart/route.ts` (new), `content-library-tab.tsx`
+
+### ATLAS run status (as of end of session)
+- Run 001 (test) — failed (old bug, not worth restarting)
+- Run 002 (BTech Colleges without JEE Main) — failed (old bug, can restart from UI)
+- Run 003 (Rajasthan UHS Admission) — **done ✅** article.html generated
+- Run 004 (Rajasthan UHS Course & Fees) — **running** at end of session
+
+### Deploy note
+- All content-studio changes: pushed to GitHub + pulled on EC2 + built + PM2 restarted
+- ATLAS Python fixes: pushed to GitHub + pulled on EC2 (no build needed for Python)
+
+---
 
 ---
 
