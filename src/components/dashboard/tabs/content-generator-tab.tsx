@@ -479,7 +479,7 @@ export function ContentGeneratorTab({
         const res = await fetch("/api/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ topic: items[idx].topic, subKeywords: items[idx].subKeywords, region: items[idx].region || region, pipeline }),
+          body: JSON.stringify({ topic: items[idx].topic, subKeywords: items[idx].subKeywords, region: items[idx].region || region, articleType: items[idx].category || undefined, pipeline }),
           signal: controller.signal,
         });
 
@@ -1576,6 +1576,8 @@ export function ContentGeneratorTab({
                   <option value="">Auto-detect from topic</option>
                   <option value="college_profile">College Profile (overview)</option>
                   <option value="college_placement">College Placements</option>
+                  <option value="admission_guide">Admission Guide</option>
+                  <option value="fee_reference">Fee Structure</option>
                   <option value="exam_guide">Exam Guide</option>
                   <option value="ranking_list">Rankings</option>
                   <option value="career_guide">Career Guide</option>

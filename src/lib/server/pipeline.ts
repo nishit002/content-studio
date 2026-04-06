@@ -381,9 +381,11 @@ export async function* runAtlasPipeline(
   const atlasTypeMap: Record<string, string> = {
     college_profile:   "college_profile",
     college_placement: "college_placement",
-    exam_guide:        "exam",
-    ranking_list:      "ranking",
-    career_guide:      "career",
+    admission_guide:   "admission_guide",
+    fee_reference:     "fee_reference",
+    exam_guide:        "exam_guide",
+    ranking_list:      "ranking_list",
+    career_guide:      "career_guide",
   };
   const mappedType = options?.contentType ? atlasTypeMap[options.contentType] : undefined;
 
