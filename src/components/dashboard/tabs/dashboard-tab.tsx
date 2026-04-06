@@ -86,22 +86,22 @@ export default function DashboardTab({ onNavigate }: { onNavigate: (tab: TabKey)
 
     if (ga4) {
       fetches.push(
-        fetch(`/api/analytics/ga4?metric=overview&days=${days}`).then((r) => r.json()).then(setGa4Overview).catch(() => {}),
-        fetch(`/api/analytics/ga4?metric=timeseries&days=${days}`).then((r) => r.json()).then((d) => setGa4Timeseries(Array.isArray(d) ? d : [])).catch(() => {}),
-        fetch(`/api/analytics/ga4?metric=sources&days=${days}`).then((r) => r.json()).then((d) => setGa4Sources(Array.isArray(d) ? d : [])).catch(() => {}),
-        fetch(`/api/analytics/ga4?metric=pages&days=${days}`).then((r) => r.json()).then((d) => setGa4Pages(Array.isArray(d) ? d : [])).catch(() => {}),
+        fetch(`/api/analytics/ga4?metric=overview&days=${days}`).then((r) => r.ok ? r.json() : null).then((d) => d && setGa4Overview(d)).catch(() => {}),
+        fetch(`/api/analytics/ga4?metric=timeseries&days=${days}`).then((r) => r.ok ? r.json() : null).then((d) => setGa4Timeseries(Array.isArray(d) ? d : [])).catch(() => {}),
+        fetch(`/api/analytics/ga4?metric=sources&days=${days}`).then((r) => r.ok ? r.json() : null).then((d) => setGa4Sources(Array.isArray(d) ? d : [])).catch(() => {}),
+        fetch(`/api/analytics/ga4?metric=pages&days=${days}`).then((r) => r.ok ? r.json() : null).then((d) => setGa4Pages(Array.isArray(d) ? d : [])).catch(() => {}),
       );
     }
     if (gsc) {
       fetches.push(
-        fetch(`/api/analytics/gsc?metric=overview&days=${days}`).then((r) => r.json()).then(setGscOverview).catch(() => {}),
-        fetch(`/api/analytics/gsc?metric=timeseries&days=${days}`).then((r) => r.json()).then((d) => setGscTimeseries(Array.isArray(d) ? d : [])).catch(() => {}),
-        fetch(`/api/analytics/gsc?metric=queries&days=${days}`).then((r) => r.json()).then((d) => setGscQueries(Array.isArray(d) ? d : [])).catch(() => {}),
+        fetch(`/api/analytics/gsc?metric=overview&days=${days}`).then((r) => r.ok ? r.json() : null).then((d) => d && setGscOverview(d)).catch(() => {}),
+        fetch(`/api/analytics/gsc?metric=timeseries&days=${days}`).then((r) => r.ok ? r.json() : null).then((d) => setGscTimeseries(Array.isArray(d) ? d : [])).catch(() => {}),
+        fetch(`/api/analytics/gsc?metric=queries&days=${days}`).then((r) => r.ok ? r.json() : null).then((d) => setGscQueries(Array.isArray(d) ? d : [])).catch(() => {}),
       );
     }
     if (bing) {
       fetches.push(
-        fetch(`/api/analytics/bing?metric=overview`).then((r) => r.json()).then(setBingOverview).catch(() => {}),
+        fetch(`/api/analytics/bing?metric=overview`).then((r) => r.ok ? r.json() : null).then((d) => d && setBingOverview(d)).catch(() => {}),
       );
     }
 
