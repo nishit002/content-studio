@@ -149,7 +149,7 @@ def run(blueprint: Blueprint, run_dir: Path) -> ArticleCharacter:
         excerpt = page.clean_text[:800].replace("\n", " ")
         excerpts.append(f"--- Article {i+1}: {page.title} ({page.url}) ---\n{excerpt}")
 
-    excerpts_text = "\n\n".join(excerpts)
+    excerpts_text = "\n\n".join(excerpts).replace("{", "{{").replace("}", "}}")
     prompt = CHARACTER_PROMPT.format(
         topic=blueprint.topic,
         n=len(valid_pages),

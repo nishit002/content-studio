@@ -164,8 +164,8 @@ def run(
 
         prompt = VERIFY_PROMPT.format(
             sub_topic_name=st_name,
-            source_text=source_text,
-            extracted_data=extracted_text,
+            source_text=source_text.replace("{", "{{").replace("}", "}}"),
+            extracted_data=extracted_text.replace("{", "{{").replace("}", "}}"),
         )
 
         try:

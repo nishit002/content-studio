@@ -131,8 +131,8 @@ def run(
             section_type=section.section_type,
             format_hint=section.format_hint or section.section_type,
             focus_keyword=outline.focus_keyword,
-            verified_data_block=data_block,
-            already_covered="\n".join(already_covered) if already_covered else "None — this is the first section.",
+            verified_data_block=data_block.replace("{", "{{").replace("}", "}}"),
+            already_covered=("\n".join(already_covered) if already_covered else "None — this is the first section.").replace("{", "{{").replace("}", "}}"),
         )
 
         html = client.generate(

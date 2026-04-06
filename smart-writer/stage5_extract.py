@@ -158,7 +158,7 @@ def run(
         prompt = EXTRACT_PROMPT.format(
             sub_topic_name=st.name,
             data_needed=", ".join(st.data_needed),
-            pages_text=pages_text,
+            pages_text=pages_text.replace("{", "{{").replace("}", "}}"),
         )
 
         try:
