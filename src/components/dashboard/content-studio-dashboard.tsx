@@ -242,6 +242,12 @@ export function ContentStudioDashboard() {
               <p className="text-th-text-muted text-xs">Quality</p>
               <p className="font-semibold text-th-success">{stats?.avgQuality ?? "—"}</p>
             </div>
+            <a
+              href="/api/auth/logout"
+              className="text-th-text-muted hover:text-th-text text-xs px-2 py-1 rounded border border-th-border hover:bg-th-sidebar-hover transition-colors"
+            >
+              Logout
+            </a>
           </div>
         </header>
 
