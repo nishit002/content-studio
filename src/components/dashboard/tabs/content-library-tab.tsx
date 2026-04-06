@@ -17,7 +17,8 @@ interface ArticleListItem {
   generation_time: number;
   generated_at: string;
   has_html: boolean;
-  source?: string; // "atlas" | undefined (undefined = CG)
+  source?: string; // "atlas" | "news" | undefined (undefined = CG)
+  wp_post_id?: number | null;
 }
 
 interface ArticleMeta {
@@ -112,6 +113,8 @@ export default function ContentLibraryTab({ refreshKey = 0 }: { refreshKey?: num
   // Delete state
   const [deleting, setDeleting] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [publishingCard, setPublishingCard] = useState<string | null>(null);
+  const [cardPublishResult, setCardPublishResult] = useState<Record<string, { ok?: boolean; post_url?: string; error?: string }>>({});
 
   const fetchArticles = useCallback(async () => {
     setLoading(true);
@@ -155,6 +158,28 @@ export default function ContentLibraryTab({ refreshKey = 0 }: { refreshKey?: num
       }
     } catch { /* ignore */ }
     finally { setDeleting(null); setConfirmDelete(null); }
+  };
+
+  const quickPublish = async (slug: string, status: "draft" | "publish") => {
+    setPublishingCard(slug);
+    setCardPublishResult((prev) => ({ ...prev, [slug]: {} }));
+    try {
+      const res = await fetch("/api/publish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug, status }),
+      });
+      const data = await res.json();
+      if (res.ok && data.post_id) {
+        setCardPublishResult((prev) => ({ ...prev, [slug]: { ok: true, post_url: data.post_url } }));
+      } else {
+        setCardPublishResult((prev) => ({ ...prev, [slug]: { error: data.error || "Publish failed" } }));
+      }
+    } catch (e) {
+      setCardPublishResult((prev) => ({ ...prev, [slug]: { error: (e as Error).message } }));
+    } finally {
+      setPublishingCard(null);
+    }
   };
 
   // Compute type counts
@@ -498,9 +523,35 @@ export default function ContentLibraryTab({ refreshKey = 0 }: { refreshKey?: num
                       {formatDate(a.generated_at)}
                     </span>
                   ) : <span />}
-                  {!a.has_html && (
-                    <span className="cs-badge bg-th-warning-soft text-th-warning text-[10px]">outline only</span>
-                  )}
+                  <div className="flex items-center gap-1.5">
+                    {!a.has_html && (
+                      <span className="cs-badge bg-th-warning-soft text-th-warning text-[10px]">outline only</span>
+                    )}
+                    {a.has_html && !cardPublishResult[a.slug]?.ok && (
+                      <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          onClick={() => quickPublish(a.slug, "draft")}
+                          disabled={publishingCard === a.slug}
+                          className="cs-badge bg-th-bg-secondary text-th-text-secondary hover:bg-th-accent hover:text-white text-[10px] cursor-pointer transition-colors py-0.5 px-1.5"
+                          title="Push to WordPress as draft"
+                        >
+                          {publishingCard === a.slug ? "Pushing..." : "→ WP Draft"}
+                        </button>
+                      </div>
+                    )}
+                    {cardPublishResult[a.slug]?.ok && (
+                      <a href={cardPublishResult[a.slug].post_url} target="_blank" rel="noopener noreferrer"
+                        className="cs-badge bg-th-success-soft text-th-success text-[10px]"
+                        onClick={(e) => e.stopPropagation()}>
+                        ✓ Published
+                      </a>
+                    )}
+                    {cardPublishResult[a.slug]?.error && (
+                      <span className="cs-badge bg-th-danger-soft text-th-danger text-[10px]" title={cardPublishResult[a.slug].error}>
+                        ✗ Failed
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* Confirm delete overlay */}

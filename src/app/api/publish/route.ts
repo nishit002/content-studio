@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/server/session";
 import { getApiKeys } from "@/lib/server/db";
+import fs from "fs";
+import path from "path";
+
+const PIPELINE_DIR = process.env.PIPELINE_DIR || path.resolve("/Volumes/NISHIT_PD/gas new/gas-split/content-generator");
+const OUTPUT_DIR = path.join(PIPELINE_DIR, "output");
+const ATLAS_DIR = process.env.ATLAS_DIR || path.resolve("/Volumes/NISHIT_PD/content-studio/smart-writer");
+const ATLAS_OUTPUT_DIR = path.join(ATLAS_DIR, "output");
 
 /**
  * POST /api/publish — Publish article to WordPress.
@@ -10,7 +17,7 @@ import { getApiKeys } from "@/lib/server/db";
 export async function POST(req: NextRequest) {
   const sessionId = await getSession();
   const body = await req.json();
-  const { title, content, slug, coverImageUrl, status, category } = body as {
+  let { title, content, slug, coverImageUrl, status, category } = body as {
     title: string;
     content: string;
     slug: string;
@@ -18,6 +25,32 @@ export async function POST(req: NextRequest) {
     status?: string;
     category?: string;
   };
+
+  // Slug-only mode: read article HTML + title from disk
+  if (slug && !content) {
+    const safeSlug = slug.replace(/[^a-z0-9-]/gi, "");
+    let articleDir = path.join(OUTPUT_DIR, safeSlug);
+    if (!fs.existsSync(articleDir)) {
+      const newsDir = path.join(OUTPUT_DIR, "news", safeSlug);
+      if (fs.existsSync(newsDir)) {
+        articleDir = newsDir;
+      } else {
+        const atlasDir = path.join(ATLAS_OUTPUT_DIR, safeSlug);
+        if (fs.existsSync(atlasDir)) articleDir = atlasDir;
+      }
+    }
+    const htmlPath = path.join(articleDir, "article.html");
+    if (!fs.existsSync(htmlPath)) {
+      return NextResponse.json({ error: "Article HTML not found on disk" }, { status: 404 });
+    }
+    content = fs.readFileSync(htmlPath, "utf-8");
+    if (!title) {
+      const metaPath = path.join(articleDir, "meta.json");
+      if (fs.existsSync(metaPath)) {
+        try { title = JSON.parse(fs.readFileSync(metaPath, "utf-8")).title || slug; } catch { title = slug; }
+      } else { title = slug; }
+    }
+  }
 
   if (!title || !content) {
     return NextResponse.json({ error: "title and content are required" }, { status: 400 });

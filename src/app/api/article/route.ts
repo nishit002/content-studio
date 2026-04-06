@@ -60,6 +60,36 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // Include news articles from output/news/
+    const NEWS_OUTPUT_DIR = path.join(OUTPUT_DIR, "news");
+    if (fs.existsSync(NEWS_OUTPUT_DIR)) {
+      const newsDirs = fs.readdirSync(NEWS_OUTPUT_DIR, { withFileTypes: true }).filter((d) => d.isDirectory());
+      for (const dir of newsDirs) {
+        const metaPath = path.join(NEWS_OUTPUT_DIR, dir.name, "meta.json");
+        if (!fs.existsSync(metaPath)) continue;
+        try {
+          const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+          const htmlPath = path.join(NEWS_OUTPUT_DIR, dir.name, "article.html");
+          articles.push({
+            slug: dir.name,
+            topic: meta.title || dir.name,
+            title: meta.title || dir.name,
+            content_type: "news_article",
+            word_count: meta.word_count || 0,
+            table_count: 0,
+            section_count: 0,
+            quality_grade: "",
+            quality_score: 0,
+            generation_time: meta.generation_time || 0,
+            generated_at: meta.generated_at || "",
+            has_html: fs.existsSync(htmlPath),
+            source: "news",
+            wp_post_id: meta.wp_post_id || null,
+          });
+        } catch { /* skip */ }
+      }
+    }
+
     // Include ATLAS articles from smart-writer/output/runs.json
     const atlasRunsPath = path.join(ATLAS_OUTPUT_DIR, "runs.json");
     if (fs.existsSync(atlasRunsPath)) {
@@ -121,19 +151,24 @@ export async function GET(req: NextRequest) {
   // Sanitize slug to prevent path traversal
   const safeSlug = slug.replace(/[^a-z0-9-]/gi, "");
 
-  // Check content-generator output first, then ATLAS output
+  // Check content-generator output, then news subdir, then ATLAS output
   let articleDir = path.join(OUTPUT_DIR, safeSlug);
   let isAtlasArticle = false;
   if (!fs.existsSync(articleDir)) {
-    const atlasDir = path.join(ATLAS_OUTPUT_DIR, safeSlug);
-    if (fs.existsSync(atlasDir)) {
-      articleDir = atlasDir;
-      isAtlasArticle = true;
+    const newsDir = path.join(OUTPUT_DIR, "news", safeSlug);
+    if (fs.existsSync(newsDir)) {
+      articleDir = newsDir;
     } else {
-      return new Response(JSON.stringify({ error: "Article not found" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-      });
+      const atlasDir = path.join(ATLAS_OUTPUT_DIR, safeSlug);
+      if (fs.existsSync(atlasDir)) {
+        articleDir = atlasDir;
+        isAtlasArticle = true;
+      } else {
+        return new Response(JSON.stringify({ error: "Article not found" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
     }
   }
 
@@ -287,17 +322,22 @@ export async function PUT(req: NextRequest) {
 
   const safeSlug = slug.replace(/[^a-z0-9-]/gi, "");
 
-  // Check CG dir first, then ATLAS
+  // Check CG dir, news subdir, then ATLAS
   let articleDir = path.join(OUTPUT_DIR, safeSlug);
   if (!fs.existsSync(articleDir)) {
-    const atlasDir = path.join(ATLAS_OUTPUT_DIR, safeSlug);
-    if (fs.existsSync(atlasDir)) {
-      articleDir = atlasDir;
+    const newsDir = path.join(OUTPUT_DIR, "news", safeSlug);
+    if (fs.existsSync(newsDir)) {
+      articleDir = newsDir;
     } else {
-      return new Response(JSON.stringify({ error: "Article not found" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-      });
+      const atlasDir = path.join(ATLAS_OUTPUT_DIR, safeSlug);
+      if (fs.existsSync(atlasDir)) {
+        articleDir = atlasDir;
+      } else {
+        return new Response(JSON.stringify({ error: "Article not found" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
     }
   }
 
@@ -338,17 +378,22 @@ export async function DELETE(req: NextRequest) {
 
   const safeSlug = slug.replace(/[^a-z0-9-]/gi, "");
 
-  // Check CG dir first, then ATLAS
+  // Check CG dir, news subdir, then ATLAS
   let articleDir = path.join(OUTPUT_DIR, safeSlug);
   if (!fs.existsSync(articleDir)) {
-    const atlasDir = path.join(ATLAS_OUTPUT_DIR, safeSlug);
-    if (fs.existsSync(atlasDir)) {
-      articleDir = atlasDir;
+    const newsDir = path.join(OUTPUT_DIR, "news", safeSlug);
+    if (fs.existsSync(newsDir)) {
+      articleDir = newsDir;
     } else {
-      return new Response(JSON.stringify({ error: "Article not found" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-      });
+      const atlasDir = path.join(ATLAS_OUTPUT_DIR, safeSlug);
+      if (fs.existsSync(atlasDir)) {
+        articleDir = atlasDir;
+      } else {
+        return new Response(JSON.stringify({ error: "Article not found" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
     }
   }
 
