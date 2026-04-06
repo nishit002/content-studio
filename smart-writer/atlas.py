@@ -403,9 +403,11 @@ Examples:
     parser.add_argument("topic", nargs="?", help="Topic to write about")
     parser.add_argument(
         "--type",
-        default="college_placement",
-        choices=["college_placement", "exam", "ranking", "college_profile", "career"],
-        help="Content type (default: college_placement)",
+        default=None,
+        choices=["college_placement", "college_profile", "admission_guide",
+                 "fee_reference", "ranking_list", "exam_guide", "career_guide",
+                 "exam", "ranking", "career"],
+        help="Content type — if omitted, auto-detected from topic keywords",
     )
     parser.add_argument(
         "--resume",

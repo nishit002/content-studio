@@ -104,7 +104,16 @@ def classify_topic(topic: str, content_type: str) -> str:
     """
     Determine article type from explicit content_type or topic keywords.
     Explicit content_type always wins. Keyword detection is the fallback.
+    None / empty string → auto-detect from topic.
     """
+    # Map short aliases from CLI to full type names
+    _ALIASES = {
+        "exam":    "exam_guide",
+        "ranking": "ranking_list",
+        "career":  "career_guide",
+    }
+    if content_type:
+        content_type = _ALIASES.get(content_type, content_type)
     # Explicit override always wins
     if content_type and content_type in STRUCTURES:
         return content_type
