@@ -567,7 +567,7 @@ export default function DashboardTab({ onNavigate }: { onNavigate: (tab: TabKey)
             </div>
             <div className="flex items-center justify-between">
               <span className="text-xs text-th-text-muted">Total Words</span>
-              <span className="text-sm font-semibold text-th-text">{totalWords >= 1000000 ? `${(totalWords / 1e6).toFixed(1)}M` : `${(totalWords / 1000).toFixed(0)}K`}</span>
+              <span className="text-sm font-semibold text-th-text">{totalWords === 0 ? "0" : totalWords >= 1000000 ? `${(totalWords / 1e6).toFixed(1)}M` : `${(totalWords / 1000).toFixed(0)}K`}</span>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-xs text-th-text-muted">Avg Words/Article</span>
