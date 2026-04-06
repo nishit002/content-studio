@@ -146,8 +146,16 @@ def run(
 
     log.info(f"Stage 7: building outline from {len(with_data)} verified sub-topics")
 
-    # Build verified summary for prompt
-    verified_summary = _build_verified_summary(with_data)
+    # Build verified summary for prompt.
+    # Escape { } in dynamic content — scraped web data may contain JSON snippets or
+    # template strings like {entity} which Python's .format() would treat as placeholders
+    # and raise KeyError. Double-brace them so they pass through as literal text.
+    def _esc(s: str) -> str:
+        return s.replace("{", "{{").replace("}", "}}")
+
+    verified_summary = _esc(_build_verified_summary(with_data))
+    character_notes  = _esc(character.notes or "none")
+    section_order    = _esc(", ".join(character.section_order) if character.section_order else "no specific order")
 
     prompt = OUTLINE_PROMPT.format(
         topic=blueprint.topic,
@@ -155,8 +163,8 @@ def run(
         article_type=blueprint.article_type,
         content_character=character.content_character,
         verified_summary=verified_summary,
-        character_notes=character.notes or "none",
-        section_order=", ".join(character.section_order) if character.section_order else "no specific order",
+        character_notes=character_notes,
+        section_order=section_order,
     )
 
     client = GeminiClient()
