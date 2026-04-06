@@ -137,6 +137,7 @@ export function ContentGeneratorTab({
   const [pipeline, setPipeline] = useState<"cg" | "atlas">("cg");
   const [topic, setTopic] = useState("");
   const [subKeywords, setSubKeywords] = useState("");
+  const [singleKwLoading, setSingleKwLoading] = useState(false);
   const [region, setRegion] = useState("India");
   const [articleType, setArticleType] = useState("");
   const [customOutline, setCustomOutline] = useState("");
@@ -367,6 +368,27 @@ export function ContentGeneratorTab({
       setBulkGeneratingKw(null);
     }
   }, [bulkRows]);
+
+  // ── Auto-generate sub-keywords for single article mode ──
+  const generateSingleKeywords = useCallback(async () => {
+    if (!topic.trim() || singleKwLoading) return;
+    setSingleKwLoading(true);
+    try {
+      const res = await fetch("/api/bulk", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topics: [topic.trim()] }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to generate keywords");
+      const kws: string[] = data.keywords?.[topic.trim()] ?? [];
+      if (kws.length) setSubKeywords(kws.join(", "));
+    } catch (err) {
+      alert((err as Error).message);
+    } finally {
+      setSingleKwLoading(false);
+    }
+  }, [topic, singleKwLoading]);
 
   // ── Bulk generation ──
   const startBulkGeneration = useCallback(async (rowsOverride?: BulkRow[]) => {
@@ -1478,9 +1500,30 @@ export function ContentGeneratorTab({
           {pipeline === "cg" && (
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-xs font-medium text-th-text-secondary mb-1.5">
-                Sub-Keywords <span className="text-th-text-muted">(optional)</span>
-              </label>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="text-xs font-medium text-th-text-secondary">
+                  Sub-Keywords <span className="text-th-text-muted">(optional)</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={generateSingleKeywords}
+                  disabled={!topic.trim() || singleKwLoading || generating}
+                  title="Auto-generate sub-keywords via DataForSEO"
+                  className="flex items-center gap-1 text-xs text-th-accent hover:text-th-accent/80 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                  {singleKwLoading ? (
+                    <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                    </svg>
+                  ) : (
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                  )}
+                  {singleKwLoading ? "Fetching..." : "Auto-fill"}
+                </button>
+              </div>
               <input
                 type="text"
                 value={subKeywords}
