@@ -466,8 +466,8 @@ function parseAtlasLine(line: string): PipelineEvent | null {
   if (!trimmed) return null;
   const ts = Date.now();
 
-  // Stage header: "  Stage N/11 — Name"
-  const stageMatch = trimmed.match(/Stage\s+(\d+)\/11\s*[—\-]+\s*(.+)/);
+  // Stage header: "  Stage N/10 — Name" or "  Stage N/11 — Name"
+  const stageMatch = trimmed.match(/Stage\s+(\d+)\/1[01]\s*[—\-]+\s*(.+)/);
   if (stageMatch) {
     const n = parseInt(stageMatch[1]);
     const name = stageMatch[2].trim();
