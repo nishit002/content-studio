@@ -1,6 +1,78 @@
 # Progress
 
-## NEXT — (no task queued — ask Nishit for next priority)
+## NEXT — All API modules working on EC2. Next: test a real CG article generation and ATLAS generation end-to-end from the UI.
+
+---
+
+## DONE — EC2 API debugging + content-generator deployment (2026-04-06)
+Status: **COMPLETE. All services confirmed working.**
+
+### Root cause of "stuck at classifier"
+Was testing wrong You.com URL (`api.ydc-index.io` — deprecated) during diagnosis. Actual SDK uses `api.you.com/v1/search` which works fine from EC2. You.com is NOT IP-blocked on EC2. The youdotcom SDK was always calling the right endpoint.
+
+### What was fixed
+- `content-generator` repo created on GitHub (private): nishit002/content-generator
+- Cloned to `/home/ubuntu/content-generator/` on EC2 (was missing)
+- `pip3 install -r requirements.txt` run — all deps installed
+- `.env` copied from content-studio `.env.local` (same keys)
+- `PIPELINE_DIR=/home/ubuntu/content-generator` already set in EC2 `.env.local` ✅
+- `search_client.py`: fixed infinite recursion bug — when all keys rate-limit, old code recursed forever; now bounded by `_attempts` counter
+
+### API status (all confirmed working from EC2)
+- Gemini ✅ HTTP 200
+- You.com SDK ✅ api.you.com/v1/search works, 3 results returned in test
+- OpenRouter ✅ HTTP 200
+- HuggingFace (ATLAS) ✅ router.huggingface.co/v1/chat/completions works
+- DataForSEO ✅ status_code 20000
+- BrightData REST ✅ (proxy protocol needs customer ID — use REST API approach in code)
+
+---
+
+## DONE — EC2 Deployment (2026-04-06)
+Status: **COMPLETE. App live at http://13.51.193.49**
+
+### What was set up
+- EC2: t3.micro, Ubuntu 22.04, eu-north-1 (Stockholm), 30GB EBS
+- 2GB swap file added (handles npm build memory spikes)
+- Node.js 20 + PM2 (auto-restart, survives reboots)
+- Python 3.10 + pip + ATLAS dependencies installed
+- Repo cloned: github.com/nishit002/content-studio → /home/ubuntu/content-studio/
+- .env.local uploaded (all API keys)
+- smart-writer/.env uploaded (ATLAS keys)
+- npm build + pm2 start via ecosystem.config.js
+- Nginx reverse proxy: port 80 → 3000, gzip enabled
+- PM2 ecosystem.config.js at /home/ubuntu/ecosystem.config.js
+
+### Key EC2 details
+- IP: 13.51.193.49
+- SSH key: ~/content-studio-key.pem
+- SSH command: ssh -i ~/content-studio-key.pem ubuntu@13.51.193.49
+- PM2 app name: content-studio
+- App dir: /home/ubuntu/content-studio/
+- ATLAS dir: /home/ubuntu/content-studio/smart-writer/
+- DB: /home/ubuntu/content-studio/data/content-studio.db
+
+### Bugs fixed during deployment
+1. dashboard-tab.tsx fmtNum() crashed on undefined (analytics APIs return 400 from EC2)
+   Fix: guard with `if (!n || isNaN(n)) return "0"`
+2. fetchAnalyticsData set state even on 400 responses — caused toFixed() crash
+   Fix: `r.ok ? r.json() : null` pattern on all analytics fetches
+3. totalWords showed "OK" instead of "0" when no articles
+   Fix: explicit zero check before toFixed chain
+4. ATLAS spawn failed with ENOENT — ATLAS_DIR was Mac path
+   Fix: ecosystem.config.js sets ATLAS_DIR=/home/ubuntu/content-studio/smart-writer
+
+### Deploy update procedure (after any code change)
+On EC2:
+  cd /home/ubuntu/content-studio
+  git pull origin main
+  NODE_OPTIONS="--max-old-space-size=1536" npm run build
+  pm2 restart content-studio
+
+### AWS credentials
+- Key ID: AKIA2UC3DI47BD7U53E5 ← DELETE THIS KEY, was shared in chat
+- Create a new key for future use
+- Region: eu-north-1 (Stockholm)
 
 ---
 
