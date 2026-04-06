@@ -219,7 +219,7 @@ export function ContentGeneratorTab({
     fetch(`/api/article?slug=${encodeURIComponent(slug)}&part=all`)
       .then((r) => r.json())
       .then((data: ArticleData) => {
-        setArticle(data);
+        setArticle({ ...data, html: data.html ?? null, meta: data.meta ?? null, outline: data.outline ?? null });
         setResultTab("preview");
       })
       .catch(() => {})
@@ -684,7 +684,7 @@ export function ContentGeneratorTab({
     fetch(`/api/article?slug=${encodeURIComponent(slug)}&part=all`)
       .then((r) => r.json())
       .then((data: ArticleData) => {
-        setArticle(data);
+        setArticle({ ...data, html: data.html ?? null, meta: data.meta ?? null, outline: data.outline ?? null });
         setResultTab("preview");
       })
       .catch(() => {})
@@ -1975,7 +1975,8 @@ function renderInsightCharts(html: string): string {
 }
 
 /* ── Clean article HTML ── */
-function cleanArticleHtml(html: string): string {
+function cleanArticleHtml(html: string | null | undefined): string {
+  if (!html) return "";
   let cleaned = html
     .replace(/<style[\s\S]*?<\/style>/gi, "")
     .replace(/cellspacing="[^"]*"/gi, "")
@@ -2318,10 +2319,10 @@ function ArticlePreview({ html, meta, slug }: { html: string | null; meta: Artic
               title="Click to edit article title"
             />
             <div className="flex items-center gap-3 mt-2 text-xs text-th-text-muted flex-wrap">
-              <span className="cs-badge bg-th-accent-soft text-th-accent">{meta.content_type.replace("_", " ")}</span>
-              <span>{meta.word_count.toLocaleString()} words</span>
-              <span>{meta.table_count} tables</span>
-              <span>{meta.section_count} sections</span>
+              {meta.content_type && <span className="cs-badge bg-th-accent-soft text-th-accent">{meta.content_type.replace("_", " ")}</span>}
+              {meta.word_count != null && <span>{meta.word_count.toLocaleString()} words</span>}
+              {meta.table_count != null && <span>{meta.table_count} tables</span>}
+              {meta.section_count != null && <span>{meta.section_count} sections</span>}
               {meta.generation_time > 0 && <span>{Math.round(meta.generation_time)}s</span>}
             </div>
           </div>
@@ -3831,11 +3832,11 @@ function ArticleLibrary({
                       </p>
                       <div className="flex items-center gap-3 mt-1.5 text-xs text-th-text-muted">
                         <span className="cs-badge bg-th-bg-secondary text-th-text-secondary">
-                          {TYPE_LABELS[a.content_type] || a.content_type.replace("_", " ")}
+                          {TYPE_LABELS[a.content_type] || (a.content_type ? a.content_type.replace("_", " ") : "")}
                         </span>
-                        <span>{a.word_count.toLocaleString()} words</span>
-                        <span>{a.table_count} tables</span>
-                        <span>{a.section_count} sections</span>
+                        {a.word_count != null && <span>{a.word_count.toLocaleString()} words</span>}
+                        {a.table_count != null && <span>{a.table_count} tables</span>}
+                        {a.section_count != null && <span>{a.section_count} sections</span>}
                         {a.generation_time > 0 && <span>{Math.round(a.generation_time)}s</span>}
                       </div>
                     </div>

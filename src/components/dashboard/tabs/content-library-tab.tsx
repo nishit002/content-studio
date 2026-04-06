@@ -1040,10 +1040,10 @@ function ArticlePreview({ html, meta, slug }: { html: string | null; meta: Artic
               title="Click to edit article title"
             />
             <div className="flex items-center gap-3 mt-2 text-xs text-th-text-muted flex-wrap">
-              <span className="cs-badge bg-th-accent-soft text-th-accent">{meta.content_type.replace("_", " ")}</span>
-              <span>{meta.word_count.toLocaleString()} words</span>
-              <span>{meta.table_count} tables</span>
-              <span>{meta.section_count} sections</span>
+              {meta.content_type && <span className="cs-badge bg-th-accent-soft text-th-accent">{meta.content_type.replace("_", " ")}</span>}
+              {meta.word_count != null && <span>{meta.word_count.toLocaleString()} words</span>}
+              {meta.table_count != null && <span>{meta.table_count} tables</span>}
+              {meta.section_count != null && <span>{meta.section_count} sections</span>}
               {meta.generation_time > 0 && <span>{Math.round(meta.generation_time)}s</span>}
             </div>
           </div>
@@ -1775,7 +1775,8 @@ function renderInsightCharts(html: string): string {
   });
 }
 
-function cleanArticleHtml(html: string): string {
+function cleanArticleHtml(html: string | null | undefined): string {
+  if (!html) return "";
   let cleaned = html
     .replace(/<style[\s\S]*?<\/style>/gi, "")
     .replace(/cellspacing="[^"]*"/gi, "")
