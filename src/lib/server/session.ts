@@ -27,7 +27,7 @@ export async function getSession(): Promise<string> {
 
   cookieStore.set(SESSION_COOKIE, sessionId, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: process.env.NODE_ENV === "production" && process.env.COOKIE_SECURE !== "false",
     sameSite: "lax",
     maxAge: SESSION_MAX_AGE,
     path: "/",
