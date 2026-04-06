@@ -1,14 +1,12 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { useRouter } from 'next/navigation'
 
 function randomInt(min: number, max: number) {
   return Math.floor(Math.random() * (max - min + 1)) + min
 }
 
 export default function LoginPage() {
-  const router = useRouter()
   const [username, setUsername]           = useState('')
   const [password, setPassword]           = useState('')
   const [captchaA, setCaptchaA]           = useState(0)
@@ -38,17 +36,17 @@ export default function LoginPage() {
       })
       const data = await res.json()
       if (res.ok) {
-        router.push('/')
-        router.refresh()
+        // Full page reload so the browser sends the new cookie on the next request
+        window.location.replace('/')
       } else {
         setError(data.error ?? 'Login failed')
+        setLoading(false)
         refreshCaptcha()
       }
     } catch {
       setError('Network error — please try again')
-      refreshCaptcha()
-    } finally {
       setLoading(false)
+      refreshCaptcha()
     }
   }
 

@@ -147,6 +147,7 @@ export function ContentGeneratorTab({
   const [currentStage, setCurrentStage] = useState<Stage | null>(null);
   const [events, setEvents] = useState<ProgressEvent[]>([]);
   const [error, setError] = useState("");
+  const [atlasRunId, setAtlasRunId] = useState("");   // set when ATLAS emits its run ID
   const [result, setResult] = useState<Record<string, unknown> | null>(null);
   const [article, setArticle] = useState<ArticleData | null>(null);
   const [articleLoading, setArticleLoading] = useState(false);
@@ -234,6 +235,7 @@ export function ContentGeneratorTab({
     setCurrentStage("queued");
     setEvents([]);
     setError("");
+    setAtlasRunId("");
     setResult(null);
 
     const controller = new AbortController();
@@ -248,8 +250,9 @@ export function ContentGeneratorTab({
       });
 
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || `HTTP ${res.status}`);
+        let errMsg = `HTTP ${res.status}`;
+        try { errMsg = (await res.json()).error || errMsg; } catch { errMsg = await res.text().catch(() => errMsg); }
+        throw new Error(errMsg);
       }
 
       const reader = res.body?.getReader();
@@ -272,6 +275,11 @@ export function ContentGeneratorTab({
             const event: ProgressEvent = JSON.parse(line.slice(6));
             setEvents((prev) => [...prev, event]);
             setCurrentStage(event.stage);
+
+            // Capture ATLAS run ID as soon as it's emitted (for resume on failure)
+            if (event.detail?.atlasRunId) {
+              setAtlasRunId(event.detail.atlasRunId as string);
+            }
 
             if (event.stage === "done" && event.detail) {
               setResult((prev) => ({ ...(prev ?? {}), ...event.detail }));
@@ -1737,13 +1745,28 @@ export function ContentGeneratorTab({
               <svg className="w-5 h-5 text-th-danger shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
               </svg>
-              <span className="text-sm text-th-danger flex-1">{error}</span>
-              <button
-                onClick={startGeneration}
-                className="text-xs font-semibold text-th-danger border border-th-danger/40 hover:bg-th-danger/10 px-2.5 py-1 rounded-md transition-colors shrink-0"
-              >
-                ↺ Try Again
-              </button>
+              <div className="flex-1 min-w-0">
+                <span className="text-sm text-th-danger">{error}</span>
+                {atlasRunId && pipeline === "atlas" && (
+                  <p className="text-xs text-th-danger/70 mt-0.5">Run {atlasRunId} — checkpoints saved</p>
+                )}
+              </div>
+              <div className="flex gap-2 shrink-0">
+                {atlasRunId && pipeline === "atlas" && (
+                  <button
+                    onClick={startGeneration}
+                    className="text-xs font-semibold text-blue-400 border border-blue-500/40 hover:bg-blue-500/10 px-2.5 py-1 rounded-md transition-colors"
+                  >
+                    ↩ Resume
+                  </button>
+                )}
+                <button
+                  onClick={startGeneration}
+                  className="text-xs font-semibold text-th-danger border border-th-danger/40 hover:bg-th-danger/10 px-2.5 py-1 rounded-md transition-colors"
+                >
+                  ↺ Restart
+                </button>
+              </div>
             </div>
           )}
 

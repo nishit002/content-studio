@@ -468,6 +468,18 @@ function parseAtlasLine(line: string): PipelineEvent | null {
   if (!trimmed) return null;
   const ts = Date.now();
 
+  // Run ID: "atlas: Starting new run 010 for:" or "atlas: Resuming existing run 010 for:"
+  const runIdMatch = trimmed.match(/(?:Starting new|Resuming existing) run (\d+) for:/);
+  if (runIdMatch) {
+    const isResume = trimmed.includes("Resuming");
+    return {
+      stage: "classifying",
+      message: isResume ? `Resuming from checkpoint (run ${runIdMatch[1]})` : `Run ${runIdMatch[1]} started`,
+      detail: { atlasRunId: runIdMatch[1] },
+      timestamp: ts,
+    };
+  }
+
   // Stage header: "  Stage N/10 — Name" or "  Stage N/11 — Name"
   const stageMatch = trimmed.match(/Stage\s+(\d+)\/1[01]\s*[—\-]+\s*(.+)/);
   if (stageMatch) {
