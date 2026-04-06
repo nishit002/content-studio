@@ -96,7 +96,7 @@ async function testApiKey(provider: string, key: string): Promise<{ ok: boolean;
     }
 
     case "you_search": {
-      const res = await fetch(`https://api.ydc-index.io/search?query=test&count=1`, {
+      const res = await fetch(`https://api.you.com/v1/search?query=test&num_web_results=1`, {
         headers: { "X-API-Key": key },
         signal: AbortSignal.timeout(10000),
       });
