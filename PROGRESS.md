@@ -1,12 +1,13 @@
 # Progress
 
-## NEXT — 3-part EC2 data + architecture upgrade (start here next session)
+## NEXT — Start here next session
 
-Three tasks, do in order:
+**Task 1 (data upload) is DONE. Tasks 2 and 3 below are still pending.**
+Read from "### Task 2" below — that is the next thing to do.
 
 ---
 
-### Task 1 — Upload local data files to EC2 (rsync, 5 min)
+### Task 1 — ✅ DONE — Upload local data files to EC2
 
 Local content-generator has real data that EC2 is missing. Upload these:
 
@@ -145,6 +146,57 @@ Files to touch: `db.ts`, `src/app/api/generate/route.ts`, `src/app/api/article/r
 ---
 
 ### After all 3 tasks — push content-generator + content-studio to GitHub, pull on EC2, restart PM2
+
+---
+
+## DONE — EC2 live testing + news pipeline fixes (2026-04-06 session 2)
+Status: **COMPLETE. All fixes deployed to EC2.**
+
+### What was done
+
+**Task 1 — Data upload to EC2 (complete)**
+- tracker.db (96 articles, 152 news_articles) → /home/ubuntu/content-generator/data/
+- news.xlsx (132KB) → /home/ubuntu/content-generator/input/
+- articles.xlsx (19KB) → /home/ubuntu/content-generator/input/
+
+**Session cookie bug (critical fix)**
+- Root cause: `secure: true` cookie on HTTP EC2 server → browser dropped cookie → every request created new session → all state lost
+- Fix: `COOKIE_SECURE=false` in `/home/ubuntu/content-studio/.env.local`
+- Code: `session.ts` now reads `process.env.COOKIE_SECURE !== "false"` before setting Secure flag
+
+**News pipeline fixes**
+- News discovery was returning 0 items in `view=discovered` even after 901 found
+  → Root cause: same session cookie bug above
+- Added `run_id` column to `news_items` table (migration in db.ts)
+- `view=discovered` now shows ONLY items from latest run (not all accumulated items)
+- Freshness filter: items older than 48 hours filtered out in `discoverNews()` (pipeline.ts)
+
+**Content Library + WordPress publish**
+- News articles were in `output/news/` subdir but article route only scanned root `output/`
+  → Fixed: article/route.ts now scans `output/news/` for list, GET, PUT, DELETE
+- Added "→ WP Draft" one-click button on every article card in Content Library
+- `publish/route.ts` now accepts `{ slug, status }` without content (reads HTML from disk)
+
+**Python dependencies installed on EC2**
+- `pip3 install spacy && python3 -m spacy download en_core_web_sm`
+- `pip3 install textstat`
+- `pip3 install language-tool-python`
+
+**WordPress author fix**
+- WP_AUTHOR_IDS=2,3,4,5,6,10,11,12,13,14 added to:
+  - `/home/ubuntu/content-generator/.env`
+  - `/home/ubuntu/content-studio/.env.local`
+- Was defaulting to author ID 1 which doesn't exist on findmycollege.co
+
+**Bug fixes committed to both repos**
+- content-studio: health check URL fixed (api.ydc-index.io → api.you.com/v1/search)
+- content-generator: Qwen writer NoneType crash fixed (empty content guard)
+
+### Known issue from this session
+- Content Library tab showed "This page couldn't load" in browser
+- Server is 100% fine (200 OK, API returns valid JSON, no PM2 errors)
+- Most likely cause: Chrome OOM with 40+ tabs open — try closing tabs and reloading
+- If crash persists in next session, check browser console for the actual JS error
 
 ---
 
