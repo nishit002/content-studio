@@ -115,6 +115,7 @@ export default function ContentLibraryTab({ refreshKey = 0 }: { refreshKey?: num
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [publishingCard, setPublishingCard] = useState<string | null>(null);
   const [cardPublishResult, setCardPublishResult] = useState<Record<string, { ok?: boolean; post_url?: string; error?: string }>>({});
+  const [restartingSlug, setRestartingSlug] = useState<string | null>(null);
 
   const fetchArticles = useCallback(async () => {
     setLoading(true);
@@ -158,6 +159,18 @@ export default function ContentLibraryTab({ refreshKey = 0 }: { refreshKey?: num
       }
     } catch { /* ignore */ }
     finally { setDeleting(null); setConfirmDelete(null); }
+  };
+
+  const restartAtlas = async (a: ArticleListItem) => {
+    setRestartingSlug(a.slug);
+    try {
+      await fetch("/api/atlas/restart", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic: a.topic, contentType: a.content_type }),
+      });
+      setTimeout(() => { setRestartingSlug(null); fetchArticles(); }, 3000);
+    } catch { setRestartingSlug(null); }
   };
 
   const quickPublish = async (slug: string, status: "draft" | "publish") => {
@@ -525,7 +538,17 @@ export default function ContentLibraryTab({ refreshKey = 0 }: { refreshKey?: num
                   ) : <span />}
                   <div className="flex items-center gap-1.5">
                     {!a.has_html && (
-                      <span className="cs-badge bg-th-warning-soft text-th-warning text-[10px]">outline only</span>
+                      a.source === "atlas" ? (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); restartAtlas(a); }}
+                          disabled={restartingSlug === a.slug}
+                          className="cs-badge bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300 text-[10px] cursor-pointer hover:bg-orange-200 transition-colors"
+                        >
+                          {restartingSlug === a.slug ? "Restarting..." : "↺ Restart"}
+                        </button>
+                      ) : (
+                        <span className="cs-badge bg-th-warning-soft text-th-warning text-[10px]">outline only</span>
+                      )
                     )}
                     {a.has_html && !cardPublishResult[a.slug]?.ok && (
                       <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
@@ -621,7 +644,7 @@ export default function ContentLibraryTab({ refreshKey = 0 }: { refreshKey?: num
                     <td className="py-3 px-3">
                       <div className="flex items-center gap-1.5">
                         <span className="cs-badge bg-th-bg-secondary text-th-text-secondary text-[10px]">
-                          {TYPE_LABELS[a.content_type] || a.content_type.replace("_", " ")}
+                          {TYPE_LABELS[a.content_type] || (a.content_type ? a.content_type.replace("_", " ") : "")}
                         </span>
                         {a.source === "atlas" && (
                           <span className="cs-badge bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 text-[10px] font-semibold">✦ ATLAS</span>
