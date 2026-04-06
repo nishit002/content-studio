@@ -2,8 +2,64 @@
 
 ## NEXT — Start here next session
 
-**Tasks 2 and 3 from the EC2 data upgrade are still pending.**
-Read from "### Task 2" below — that is the next thing to do.
+**ATLAS quality + pipeline fixes are complete. Tasks 2 and 3 from EC2 data upgrade still pending.**
+Read from "### Task 2" below after verifying ATLAS bulk runs are working correctly.
+
+**Before starting Task 2:** Run the 5 topics from Nishit's bulk file and confirm articles generate correctly:
+- Rajasthan University of Health Sciences Admission → should be admission_guide
+- Rajasthan University of Health Sciences Course & Fees → should be fee_reference
+- Banaras Hindu University Admission → admission_guide
+- Banaras Hindu University Ranking → ranking_list
+- Banaras Hindu University Placement → college_placement
+
+---
+
+## DONE — ATLAS pipeline quality hardening (2026-04-06 session 4)
+Status: **COMPLETE. All fixes deployed to EC2.**
+
+### Root causes found and fixed
+
+**1. atlas.py `--type` default = `college_placement` (ROOT CAUSE of all wrong article types)**
+- argparse `default="college_placement"` meant EVERY run without explicit `--type` became a placement article
+- pipeline.ts fix (omit `--type` when blank) was correct but irrelevant — atlas.py still defaulted
+- Fix: `default=None` in atlas.py argparse; expanded choices to include all full type names
+- Files: `smart-writer/atlas.py`, `smart-writer/stage1_blueprint.py`
+
+**2. Stage progress stuck at "classifying" forever**
+- `parseAtlasLine()` regex matched `Stage N/11` but atlas.py prints `Stage N/10`
+- Fix: regex changed to `/Stage N\/1[01]/` (accepts both)
+- File: `src/lib/server/pipeline.ts`
+
+**3. `{entity}` KeyError in outline / write stages**
+- Scraped web pages contain JSON-LD, schema markup with `{curly_braces}` that crash Python `.format()`
+- Fixed in: `smart-writer/stage2_character.py`, `stage5_extract.py`, `stage6_verify.py`, `stage7_outline.py`, `stage8_write.py`
+- Also fixed in: `content-generator/src/outliner.py`
+
+**4. Entity validation too loose — ranking list pages passing as sources**
+- One mention of entity in a table row was enough to pass validation
+- Fix: require ≥ 2 occurrences in `smart-writer/fetcher.py`
+
+**5. Stage 7 title type-mismatch guard**
+- Gemini could generate "Placements 2024" title for an admission article if wrong sources slipped through
+- Fix: `_is_type_mismatch()` + `_TYPE_MISMATCH_FORBIDDEN` dict in `stage7_outline.py`
+
+**6. You.com queries missing for admission/fee/ranking article types**
+- researcher.py only had query patterns for exam, placement, college_profile, career
+- Admission topics got 0 You.com results → 0 snippets → pipeline died silently
+- Fix: added `admission_guide`, `fee_reference`, `ranking_list` query patterns in `researcher.py`
+
+**7. Process dying silently — runs.json stuck as "running"**
+- SIGTERM killed process before `except Exception` could update runs.json
+- Fix: SIGTERM signal handler in `atlas.py` marks run as failed before exit
+
+**8. DataForSEO auto-fill keywords in single article mode**
+- Added "Auto-fill" button next to Sub-Keywords field (reuses PUT /api/bulk endpoint)
+- File: `src/components/dashboard/tabs/content-generator-tab.tsx`
+
+### Deploy note
+- All content-studio changes: pushed + pulled + built + PM2 restarted on EC2
+- All ATLAS Python changes: pushed + pulled on EC2 (no build needed)
+- content-generator outliner fix: pushed to nishit002/content-generator + pulled on EC2
 
 ---
 

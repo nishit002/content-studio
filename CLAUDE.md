@@ -597,6 +597,14 @@ article.html                Final assembled + proofread article
 - `smart-writer/fetcher.py` — entity validation strips commas before matching (fixes "Amity University, Noida" mismatch)
 - `smart-writer/stage1_blueprint.py` — Python classifier + fixed sub-topic skeletons (rewritten 2026-04-03)
 
+### Known issues fixed (2026-04-06) — DO NOT REVERT
+- **atlas.py `--type default="college_placement"`** — argparse default forced every run without explicit `--type` to placement type, overriding `classify_topic`. Fix: `default=None`. (`atlas.py`, `stage1_blueprint.py`)
+- **Stage progress regex mismatch** — parseAtlasLine() matched `Stage N/11` but atlas.py prints `Stage N/10`. UI stuck at "classifying" for entire run. Fix: regex `/1[01]/`. (`pipeline.ts`)
+- **`{entity}` KeyError in `.format()`** — scraped web pages contain JSON-LD `{curly_braces}`. Python's `.format()` treats them as placeholders → crash. Fixed in stage2, 5, 6, 7, 8 (ATLAS) and `outliner.py` (CG). Escape with `.replace("{","{{")` before `.format()`.
+- **Entity validation 1-occurrence too loose** — ranking list pages listing entity once in a table row passed validation. Fix: require ≥ 2 occurrences. (`fetcher.py`)
+- **researcher.py missing article-type query patterns** — admission/fee/ranking types had no You.com queries → 0 results → pipeline died silently after Stage 4. Fix: added query patterns for `admission_guide`, `fee_reference`, `ranking_list`.
+- **SIGTERM kills process silently** — runs.json stuck as "running" forever, Restart button never appeared. Fix: SIGTERM signal handler updates runs.json before exit. (`atlas.py`)
+
 ### Known issues fixed (2026-04-03)
 - ATLAS articles not showing in library → runs.json uses relative paths; fixed with `path.join(ATLAS_DIR, runDir)`
 - CSS distortion on ATLAS article open → `_ARTICLE_STYLE` leaked into dashboard; fixed by stripping `<style>` in cleanArticleHtml
