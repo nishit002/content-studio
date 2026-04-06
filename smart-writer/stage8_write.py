@@ -70,6 +70,7 @@ Output format rules:
 6. When you have used all the verified data, stop. Do not add extra paragraphs.
 7. No <html>, <head>, <body> tags. Raw section HTML only.
 8. If this is NOT the first section, do not re-introduce the institution name with background info.
+9. OPENING PARAGRAPH RULE: The very first <p> after the heading must directly state the key fact or figure for THIS section — not introduce the institution, not repeat the article context. Jump straight into the specific topic (e.g. "The NEET UG cutoff for MBBS at RUHS is 116–720 for general category..." not "Rajasthan University of Health Sciences is a premier institution...").
 
 Write the HTML now:
 """

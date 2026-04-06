@@ -232,7 +232,7 @@ def run(topic: str, content_type: str, run_dir: Path) -> Blueprint:
         temperature=0.1,
     )
     primary_entity = entity_raw.get("primary_entity") or topic
-    year = entity_raw.get("year")
+    year = entity_raw.get("year") or "2026"  # default to current year when not specified in topic
     entity_type = entity_raw.get("entity_type", "college")
     character_hint = entity_raw.get("content_character_hint", "data-heavy")
     log.info(f"Stage 1: entity='{primary_entity}', year={year}")

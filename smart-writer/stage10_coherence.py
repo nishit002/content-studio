@@ -356,9 +356,6 @@ _ARTICLE_STYLE = """\
   table.data-table th, table.data-table td { border: 1px solid #bbb; padding: 0.5rem 0.75rem; text-align: left; }
   table.data-table th { background: #f2f2f2; font-weight: 600; }
   table.data-table tr:nth-child(even) td { background: #fafafa; }
-  nav.toc { background: #f7f7f7; border: 1px solid #ddd; padding: 1rem 1.5rem; margin: 1.5rem 0; border-radius: 4px; }
-  nav.toc ol { margin: 0; padding-left: 1.2rem; }
-  nav.toc li { margin: 0.3rem 0; }
   .faq-section { margin-top: 2rem; }
   .faq-item { margin-bottom: 1.2rem; }
   .faq-question { font-size: 1rem; margin-bottom: 0.3rem; }
@@ -465,7 +462,6 @@ def _build_final_html(
     # Plain text version of article for FAQ extraction
     article_plain = re.sub(r"<[^>]+>", " ", draft_html)
 
-    toc = _build_toc(sections)
     faq = _build_faq_section(outline, article_plain)
     sources_html = ""
     if source_urls:
@@ -485,8 +481,6 @@ def _build_final_html(
 <body>
 <article>
 <h1>{outline.h1_title}</h1>
-
-{toc}
 
 {draft_html}
 

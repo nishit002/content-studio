@@ -81,9 +81,15 @@ If you have a strong verified stat (NIRF rank, avg package, founded year), inclu
 1. Only include sections where verified data EXISTS in the list above.
    If a sub-topic has has_data=false, DO NOT create a section for it.
 2. 5-8 sections total (not counting FAQ). Each section = 600-800 words target.
-3. Section headings MUST contain a specific fact or number from the verified data.
-   BAD: "IIM Ahmedabad Placement Overview"
-   GOOD: "IIM Ahmedabad Placements 2024: 100% Placement with ₹32.2 LPA Average"
+3. Section headings must be concise keyword/topic phrases (5–8 words). They are navigation labels, NOT sentences.
+   Use the entity short form or abbreviation (e.g. RUHS, IIM-A, BHU) not the full name unless needed for clarity.
+   A heading CAN include one key fact but must NOT be a full statement or claim.
+   BAD (too long, sentence-style): "Rajasthan University of Health Sciences Admission 2024-25: Centralized Admissions via Official Portal"
+   BAD (too generic): "Admission Overview"
+   GOOD: "RUHS Admission 2026: Process & Official Portal"
+   GOOD: "Eligibility Criteria for MBBS & Other Courses"
+   GOOD: "NEET UG & RUHS Entrance Exam Requirements"
+   GOOD: "How to Apply: Step-by-Step Guide"
 4. Each sub-topic id must appear in AT MOST ONE section's sub_topic_ids list.
    NEVER assign the same sub-topic to two different sections — this creates duplicate content.
 5. Adapt to the content character:
