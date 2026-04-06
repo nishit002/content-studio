@@ -797,6 +797,7 @@ function AreaChart({ data, lines, height }: {
    Helpers
    ══════════════════════════════════════════════════════════ */
 function fmtNum(n: number): string {
+  if (!n || isNaN(n)) return "0";
   if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
   if (n >= 10000) return `${(n / 1000).toFixed(0)}K`;
   if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
