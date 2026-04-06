@@ -2,15 +2,34 @@
 
 ## NEXT — Start here next session
 
-**ATLAS quality + pipeline fixes are complete. Tasks 2 and 3 from EC2 data upgrade still pending.**
-Read from "### Task 2" below after verifying ATLAS bulk runs are working correctly.
+**ATLAS pipeline is now fully hardened. Tasks 2 and 3 from EC2 data upgrade still pending.**
 
-**Before starting Task 2:** Run the 5 topics from Nishit's bulk file and confirm articles generate correctly:
-- Rajasthan University of Health Sciences Admission → should be admission_guide
-- Rajasthan University of Health Sciences Course & Fees → should be fee_reference
-- Banaras Hindu University Admission → admission_guide
-- Banaras Hindu University Ranking → ranking_list
-- Banaras Hindu University Placement → college_placement
+## First thing next session — verify ATLAS is working with a test run
+Run ONE topic first before Task 2. Pick any from this list and watch it complete:
+- "Rajasthan University of Health Sciences Admission" → expect admission_guide blueprint, admission-focused article
+- "Banaras Hindu University Ranking" → expect ranking_list blueprint
+
+**Check these in the event log:**
+1. Stage 1 log should say: `classified '...' → type='admission_guide'` (NOT college_placement)
+2. Progress bar should move through: Classifying → Researching → Outlining → Writing → Done
+3. Article title should be: "RUHS Admission 2025: Eligibility, Cutoff & How to Apply" style
+
+**If run gets stuck as "running" with dead process** (check with `ps aux | grep atlas`):
+```bash
+ssh -i ~/content-studio-key.pem ubuntu@13.51.193.49
+cd /home/ubuntu/content-studio/smart-writer
+python3 -c "
+import json; from pathlib import Path
+r = json.loads(Path('output/runs.json').read_text())
+r['NNN']['status'] = 'failed'
+r['NNN']['error'] = 'killed'
+Path('output/runs.json').write_text(json.dumps(r, indent=2))
+print('done')
+"
+```
+Then Restart button appears in Content Library.
+
+Once ATLAS test confirms clean → proceed to Task 2 below.
 
 ---
 

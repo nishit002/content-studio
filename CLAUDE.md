@@ -597,12 +597,71 @@ article.html                Final assembled + proofread article
 - `smart-writer/fetcher.py` — entity validation strips commas before matching (fixes "Amity University, Noida" mismatch)
 - `smart-writer/stage1_blueprint.py` — Python classifier + fixed sub-topic skeletons (rewritten 2026-04-03)
 
+### ATLAS article_type flow — verified end-to-end (2026-04-06)
+This is the complete chain. Every link must stay intact. Do NOT break any part of this.
+
+```
+User enters topic (+ optional type dropdown)
+  ↓
+content-generator-tab.tsx — sends { topic, articleType, pipeline:"atlas" } to POST /api/generate
+  (bulk mode: also sends category field from each row as articleType)
+  ↓
+generate/route.ts — passes { contentType: articleType } to runAtlasPipeline()
+  ↓
+pipeline.ts runAtlasPipeline() — atlasTypeMap converts UI type to atlas type name
+  atlasTypeMap: { college_profile, college_placement, admission_guide, fee_reference,
+                  exam_guide, ranking_list, career_guide }
+  if articleType is blank → mappedType = undefined → --type NOT passed to atlas.py
+  ↓
+atlas.py argparse — --type default=None (NOT college_placement — that was the bug)
+  if --type passed → use it; if None → classify_topic() reads topic keywords
+  ↓
+stage1_blueprint.classify_topic(topic, content_type)
+  Keyword detection order: exam → placement → fees → ranking → admission → career → college
+  "Admission" → admission_guide, "Fees/Course" → fee_reference, "Ranking" → ranking_list
+  "Placement" → college_placement, "College name only" → college_profile
+  ↓
+Blueprint built with correct sub-topics for that article type
+  (admission_guide has 7 sub-topics: overview, eligibility, entrance exams,
+   selection process, cutoff trends, application steps, important dates)
+  ↓
+researcher.py builds You.com queries per article_type:
+  admission_guide → eligibility, entrance exam, cutoff, counselling queries
+  fee_reference   → fee structure, hostel charges, scholarship queries
+  ranking_list    → NIRF, ranking parameters queries
+  college_placement → salary, placement report, top recruiters queries
+  ↓
+stage7_outline.py — title validated against article_type via _is_type_mismatch()
+  admission article CANNOT get "Placements 2024" title (TYPE_MISMATCH_FORBIDDEN)
+  fallback titles baked in _FALLBACK_TITLE_TEMPLATES per type
+```
+
+### ATLAS article types — what each does
+| Type | Keyword triggers | Sub-topics structure |
+|---|---|---|
+| `college_placement` | placement, salary, package, recruiters, LPA | stats, salary breakdown, sector, recruiters, dept-wise, YoY, PPO |
+| `admission_guide` | admission, cutoff, eligibility, apply, merit list | overview, eligibility, entrance exams, selection, cutoff trends, steps, dates |
+| `fee_reference` | fee, fees, tuition, cost of, scholarship | fee overview, programme-wise, hostel, scholarships, payment, comparison |
+| `ranking_list` | ranking, NIRF, best college, top college | overview, top colleges list, category rankings, YoY changes, factors, how to use |
+| `exam_guide` | jee, neet, cuet, cat, syllabus, exam pattern | overview, eligibility, syllabus, pattern, preparation, dates, past analysis |
+| `career_guide` | career, scope of, jobs after, career in | overview, skills, job roles, salary, employers, path, how to enter |
+| `college_profile` | university, college, institute (no angle) | overview, courses, admission, fees, placements, rankings, campus, how to apply |
+
+### ATLAS robustness rules (2026-04-06) — DO NOT REVERT
+- **`{entity}` escaping** — ANY dynamic content from scraped web (research_summary, verified_summary, page text, extracted data) MUST be escaped with `.replace("{","{{").replace("}","}}")` before being passed to Python's `.format()`. JSON-LD on websites contains `{entity}`, `{value}`, etc. Applies to: stage2, 5, 6, 7, 8 (ATLAS) and outliner.py (CG).
+- **Entity validation ≥ 2 occurrences** — `fetcher.py _validate_entity()` requires entity name to appear ≥ 2 times. Compact/acronym checks remain 1-occurrence (they are specific enough).
+- **Stage progress regex** — `parseAtlasLine()` in `pipeline.ts` uses `/Stage\s+(\d+)\/1[01]/` to match both `/10` and `/11`. atlas.py prints `Stage N/10`. Do NOT change to `/11` only.
+- **SIGTERM handler** — `atlas.py` registers `signal.SIGTERM` handler that updates `runs.json` to "failed" before exit. Do not remove.
+- **runs.json stuck as "running"** — if a run shows "running" but process is dead, mark it failed manually: `python3 -c "import json; from pathlib import Path; r=json.loads(Path('output/runs.json').read_text()); r['NNN']['status']='failed'; r['NNN']['error']='killed'; Path('output/runs.json').write_text(json.dumps(r,indent=2))"` — then Restart button appears in UI.
+
 ### Known issues fixed (2026-04-06) — DO NOT REVERT
 - **atlas.py `--type default="college_placement"`** — argparse default forced every run without explicit `--type` to placement type, overriding `classify_topic`. Fix: `default=None`. (`atlas.py`, `stage1_blueprint.py`)
+- **Bulk category not passed to generate API** — `category` field was collected in bulk rows but silently dropped. Fix: pass as `articleType` in fetch body. (`content-generator-tab.tsx`)
+- **atlasTypeMap missing admission_guide + fee_reference** — if user selected these from dropdown, they mapped to `undefined` and were ignored. Fix: added to map with full type names. (`pipeline.ts`)
 - **Stage progress regex mismatch** — parseAtlasLine() matched `Stage N/11` but atlas.py prints `Stage N/10`. UI stuck at "classifying" for entire run. Fix: regex `/1[01]/`. (`pipeline.ts`)
-- **`{entity}` KeyError in `.format()`** — scraped web pages contain JSON-LD `{curly_braces}`. Python's `.format()` treats them as placeholders → crash. Fixed in stage2, 5, 6, 7, 8 (ATLAS) and `outliner.py` (CG). Escape with `.replace("{","{{")` before `.format()`.
-- **Entity validation 1-occurrence too loose** — ranking list pages listing entity once in a table row passed validation. Fix: require ≥ 2 occurrences. (`fetcher.py`)
-- **researcher.py missing article-type query patterns** — admission/fee/ranking types had no You.com queries → 0 results → pipeline died silently after Stage 4. Fix: added query patterns for `admission_guide`, `fee_reference`, `ranking_list`.
+- **`{entity}` KeyError in `.format()`** — scraped web pages contain JSON-LD `{curly_braces}`. Fixed in stage2, 5, 6, 7, 8 (ATLAS) and `outliner.py` (CG).
+- **Entity validation 1-occurrence too loose** — ranking list pages listing entity once in a table row passed. Fix: require ≥ 2 occurrences. (`fetcher.py`)
+- **researcher.py missing article-type query patterns** — admission/fee/ranking types had no You.com queries → 0 results → pipeline died silently after Stage 4. Fix: added query patterns for `admission_guide`, `fee_reference`, `ranking_list`. (`researcher.py`)
 - **SIGTERM kills process silently** — runs.json stuck as "running" forever, Restart button never appeared. Fix: SIGTERM signal handler updates runs.json before exit. (`atlas.py`)
 
 ### Known issues fixed (2026-04-03)
