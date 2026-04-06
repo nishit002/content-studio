@@ -51,26 +51,26 @@ Typical section order from top-ranking articles: {section_order}
 ═══ H1 TITLE RULES (read carefully — violations are NOT acceptable) ═══
 
 BANNED title patterns — NEVER use any of these:
-  ✗ "{entity}: What It Is, Key Facts & Why It Matters"
-  ✗ "{entity}: What {abbreviation} Is, Key Facts & Why It Matters"
-  ✗ "Complete Guide to {entity}"
-  ✗ "Everything You Need to Know About {entity}"
-  ✗ "All About {entity}"
-  ✗ "{entity}: An Overview"
+  ✗ "ENTITY: What It Is, Key Facts & Why It Matters"
+  ✗ "ENTITY: What ABBREVIATION Is, Key Facts & Why It Matters"
+  ✗ "Complete Guide to ENTITY"
+  ✗ "Everything You Need to Know About ENTITY"
+  ✗ "All About ENTITY"
+  ✗ "ENTITY: An Overview"
   ✗ Any title that re-abbreviates the entity name
     (e.g. if entity is "VIT-AP Amaravathi", do NOT write "What VIT is" — "VIT" is not short for anything you should expand or re-abbreviate)
 
 REQUIRED: Use the primary_entity name EXACTLY as given above. Do not shorten, re-abbreviate, or expand it.
 
-REQUIRED title format per article type:
-  college_profile    → "{entity}: Courses, Fees, Rankings & Placement {year}"
-                       OR "{entity} Review {year}: Admission, Fees & Campus Life"
-  college_placement  → "{entity} Placements {year}: Average Package, Top Recruiters & Stats"
-  exam_guide         → "{exam} {year}: Syllabus, Exam Pattern, Eligibility & Dates"
-  fee_reference      → "{entity} Fees {year}: B.Tech, MBA & Hostel Cost Breakdown"
-  admission_guide    → "{entity} Admission {year}: Eligibility, Cutoff & How to Apply"
-  ranking_list       → "{ranking_name} {year}: Top Colleges, Scores & Category-Wise List"
-  career_guide       → "Career in {field}: Salary, Job Roles & How to Get Started"
+REQUIRED title format per article type (replace ENTITY/YEAR/EXAM/FIELD/RANKING_NAME with actual values):
+  college_profile    → "ENTITY: Courses, Fees, Rankings & Placement YEAR"
+                       OR "ENTITY Review YEAR: Admission, Fees & Campus Life"
+  college_placement  → "ENTITY Placements YEAR: Average Package, Top Recruiters & Stats"
+  exam_guide         → "EXAM YEAR: Syllabus, Exam Pattern, Eligibility & Dates"
+  fee_reference      → "ENTITY Fees YEAR: B.Tech, MBA & Hostel Cost Breakdown"
+  admission_guide    → "ENTITY Admission YEAR: Eligibility, Cutoff & How to Apply"
+  ranking_list       → "RANKING_NAME YEAR: Top Colleges, Scores & Category-Wise List"
+  career_guide       → "Career in FIELD: Salary, Job Roles & How to Get Started"
 
 If you have a strong verified stat (NIRF rank, avg package, founded year), include it:
   GOOD: "VIT-AP Amaravathi: Courses, Fees, NIRF Rank & Placement 2025"

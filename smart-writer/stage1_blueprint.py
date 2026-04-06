@@ -299,6 +299,7 @@ def _parse_blueprint(topic: str, data: dict) -> Blueprint:
         topic=topic,
         primary_entity=data.get("primary_entity", ""),
         entity_type=data.get("entity_type", "college"),
+        article_type=data.get("article_type", "college_profile"),
         year=data.get("year"),
         sub_topics=sub_topics,
         content_character_hint=data.get("content_character_hint", "data-heavy"),

@@ -26,6 +26,7 @@ class Blueprint:
     topic: str
     primary_entity: str            # e.g. "IIM Ahmedabad", "CUET UG 2026"
     entity_type: str               # "business_school" | "iit" | "exam" | "ranking" | "career" | "college"
+    article_type: str              # "college_profile" | "college_placement" | "exam_guide" | etc.
     year: Optional[str]            # e.g. "2024", "2026" — None if not in topic
     sub_topics: list[SubTopic]
     content_character_hint: str    # initial guess: "data-heavy" | "comparison" | "narrative"
