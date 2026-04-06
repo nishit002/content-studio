@@ -793,7 +793,7 @@ export async function discoverNews(sessionId: string): Promise<NewsDiscoveryItem
           seenUrls.add(norm);
 
           // Skip non-education items from general feeds
-          if (isEducationRelevant(item.title)) {
+          if (isEducationRelevant(item.title) && isRecentItem(item.published)) {
             allItems.push(item);
           }
         }
@@ -854,6 +854,18 @@ function parseRssItems(xml: string, sourceName: string, category: string): NewsD
   }
 
   return items.slice(0, 20); // Max 20 per source
+}
+
+/* ── Freshness filter — only keep items published within last 48 hours ── */
+function isRecentItem(published: string, maxAgeHours = 48): boolean {
+  if (!published) return true; // no date = include (be lenient)
+  try {
+    const date = new Date(published);
+    if (isNaN(date.getTime())) return true; // unparseable = include
+    return Date.now() - date.getTime() <= maxAgeHours * 3600 * 1000;
+  } catch {
+    return true;
+  }
 }
 
 /* ── Education relevance filter ── */
