@@ -102,28 +102,35 @@ class GeminiClient:
         prompt: str,
         temperature: float = 0.1,
         max_tokens: int = 8192,
+        retries: int = 3,
     ) -> dict | list:
         """
         Like generate() but strips markdown fences and parses JSON.
-        Raises ValueError if JSON cannot be parsed.
+        Retries up to `retries` times if JSON is truncated or malformed.
+        Raises ValueError if all attempts fail.
         """
         full_prompt = (
             prompt
             + "\n\nIMPORTANT: Respond with valid JSON only. No markdown fences, no explanation, "
             "no text before or after the JSON."
         )
-        raw = self.generate(full_prompt, temperature=temperature, max_tokens=max_tokens)
-        # Strip possible markdown code fences
-        cleaned = raw.strip()
-        if cleaned.startswith("```"):
-            lines = cleaned.split("\n")
-            # remove first and last fence lines
-            cleaned = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError as e:
-            log.error(f"Gemini JSON parse failed.\nRaw response:\n{raw[:500]}")
-            raise ValueError(f"Gemini did not return valid JSON: {e}") from e
+        last_err: Exception | None = None
+        for attempt in range(retries):
+            raw = self.generate(full_prompt, temperature=temperature, max_tokens=max_tokens)
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                lines = cleaned.split("\n")
+                cleaned = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+            try:
+                return json.loads(cleaned)
+            except json.JSONDecodeError as e:
+                last_err = e
+                log.warning(f"Gemini JSON parse failed (attempt {attempt+1}/{retries}): {e}")
+                log.debug(f"Raw response:\n{raw[:300]}")
+                if attempt < retries - 1:
+                    time.sleep(2)
+        log.error(f"Gemini JSON parse failed after {retries} attempts.\nRaw response:\n{raw[:500]}")
+        raise ValueError(f"Gemini did not return valid JSON: {last_err}") from last_err
 
 
 # ─── Qwen via HuggingFace Router ─────────────────────────────────────────────

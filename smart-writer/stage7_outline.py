@@ -160,7 +160,7 @@ def run(
     )
 
     client = GeminiClient()
-    result = client.generate_json(prompt, temperature=0.2, max_tokens=8192)
+    result = client.generate_json(prompt, temperature=0.2, max_tokens=16000)
 
     # Validate required keys
     if "sections" not in result or not result["sections"]:
