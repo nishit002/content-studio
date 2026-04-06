@@ -375,7 +375,9 @@ export async function* runAtlasPipeline(
     }
   }
 
-  // Map content-studio article types to ATLAS content types
+  // Map content-studio article types to ATLAS content types.
+  // Only pass --type when the user explicitly selected one.
+  // If blank, atlas.py classify_topic() detects from topic keywords (e.g. "Admission" → admission_guide).
   const atlasTypeMap: Record<string, string> = {
     college_profile:   "college_profile",
     college_placement: "college_placement",
@@ -383,9 +385,10 @@ export async function* runAtlasPipeline(
     ranking_list:      "ranking",
     career_guide:      "career",
   };
-  const contentType = atlasTypeMap[options?.contentType || ""] || "college_placement";
+  const mappedType = options?.contentType ? atlasTypeMap[options.contentType] : undefined;
 
-  const args = ["atlas.py", topic, "--type", contentType, "--use-you-research"];
+  const args = ["atlas.py", topic, "--use-you-research"];
+  if (mappedType) args.push("--type", mappedType);
   if (options?.force) args.push("--force");
 
   yield { stage: "queued", message: `Starting ATLAS pipeline for: ${topic}`, timestamp: Date.now() };
