@@ -145,11 +145,18 @@ def _validate_entity(clean_text: str, primary_entity: str) -> bool:
     compact = entity_lower.replace(" ", "")
     if compact in text_lower:
         return True
-    # Try acronym: first letter of each word (e.g. "IIM Ahmedabad" → "IIMA") — existence check only
+    # Try acronym: first letter of each meaningful word, skipping stop words
+    # e.g. "Rajasthan University of Health Sciences" → "RUHS" (not "RUOHS")
+    # e.g. "Indian Institute of Technology" → "IIT" (not "IIOT")
+    _STOP = {"of", "the", "for", "and", "in", "a", "an", "at", "by", "to"}
     words = primary_entity.split()
     if len(words) >= 2:
-        acronym = "".join(w[0] for w in words).lower()
-        if acronym in text_lower:
+        acronym = "".join(w[0] for w in words if w.lower() not in _STOP).lower()
+        if len(acronym) >= 2 and acronym in text_lower:
+            return True
+        # Also try full acronym including stop words as fallback
+        full_acronym = "".join(w[0] for w in words).lower()
+        if full_acronym != acronym and full_acronym in text_lower:
             return True
     return False
 
