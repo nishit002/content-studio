@@ -78,6 +78,14 @@ def run(run_dir: Path) -> str:
 
     html = article_path.read_text(encoding="utf-8")
 
+    # Pre-pass: collapse spaced OCR artifacts in table cells (Gemini only sees <p> tags below)
+    # "S t a t e" → "State", "C a u t i o n" → "Caution"
+    html = re.sub(
+        r"\b([A-Za-z])(?: [A-Za-z]){2,}\b",
+        lambda m: m.group(0).replace(" ", ""),
+        html,
+    )
+
     # Find all <p> tags with their full content
     p_pattern = re.compile(r'(<p[^>]*>)(.*?)(</p>)', re.DOTALL | re.IGNORECASE)
     matches = list(p_pattern.finditer(html))

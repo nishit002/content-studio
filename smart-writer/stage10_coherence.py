@@ -414,6 +414,42 @@ def _inject_key_callouts(html: str, article_type: str) -> str:
     return html
 
 
+def _fix_truncated_tables(html: str) -> str:
+    """
+    Close any unclosed <table> elements caused by writer token-limit truncation.
+    Finds the last complete </tr>, discards garbage after it, then closes the table.
+    """
+    open_count  = len(re.findall(r"<table\b", html, re.IGNORECASE))
+    close_count = len(re.findall(r"</table>",  html, re.IGNORECASE))
+    if open_count <= close_count:
+        return html  # all tables properly closed
+
+    tables_to_close = open_count - close_count
+    last_tr_end = html.rfind("</tr>")
+    if last_tr_end == -1:
+        # no complete row at all — just append closing tags at end
+        return html + "\n</table>" * tables_to_close
+
+    cut_pos = last_tr_end + len("</tr>")
+
+    # Find the next block-level element after the truncation point
+    rest = html[cut_pos:]
+    next_block = re.search(
+        r"<(?:section|div\b|h[1-6]\b|nav\b|footer\b|ul\b|ol\b)",
+        rest,
+        re.IGNORECASE,
+    )
+
+    closing_tags = "\n</table>" * tables_to_close + "\n"
+    if next_block:
+        inject = cut_pos + next_block.start()
+        html = html[:inject] + closing_tags + html[inject:]
+    else:
+        html = html[:cut_pos] + closing_tags + html[cut_pos:]
+
+    return html
+
+
 def _sanitize_html(html: str) -> str:
     """
     Final cleanup pass run on the assembled draft before saving.
@@ -440,6 +476,18 @@ def _sanitize_html(html: str) -> str:
     }
     for pattern, replacement in ocr_fixes.items():
         html = re.sub(pattern, replacement, html, flags=re.IGNORECASE)
+
+    # Collapse spaced OCR artifacts: "S t a t e" → "State", "C a u t i o n" → "Caution"
+    # Pattern: 3 or more single letters each separated by exactly one space
+    # Uses {2,} so minimum match is 3 letters (avoids joining legitimate 2-letter combos)
+    html = re.sub(
+        r"\b([A-Za-z])(?: [A-Za-z]){2,}\b",
+        lambda m: m.group(0).replace(" ", ""),
+        html,
+    )
+
+    # Fix truncated tables (writer hit token limit mid-cell)
+    html = _fix_truncated_tables(html)
 
     # Collapse excess blank lines
     html = re.sub(r"\n{3,}", "\n\n", html)
