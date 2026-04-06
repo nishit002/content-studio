@@ -1,6 +1,150 @@
 # Progress
 
-## NEXT — All API modules working on EC2. Next: test a real CG article generation and ATLAS generation end-to-end from the UI.
+## NEXT — 3-part EC2 data + architecture upgrade (start here next session)
+
+Three tasks, do in order:
+
+---
+
+### Task 1 — Upload local data files to EC2 (rsync, 5 min)
+
+Local content-generator has real data that EC2 is missing. Upload these:
+
+```bash
+# Run from Mac terminal (not EC2)
+scp -i ~/content-studio-key.pem \
+  /Volumes/NISHIT_PD/content-generator/data/tracker.db \
+  ubuntu@13.51.193.49:/home/ubuntu/content-generator/data/tracker.db
+
+scp -i ~/content-studio-key.pem \
+  /Volumes/NISHIT_PD/content-generator/input/news.xlsx \
+  ubuntu@13.51.193.49:/home/ubuntu/content-generator/input/news.xlsx
+
+scp -i ~/content-studio-key.pem \
+  /Volumes/NISHIT_PD/content-generator/input/articles.xlsx \
+  ubuntu@13.51.193.49:/home/ubuntu/content-generator/input/articles.xlsx
+```
+
+What's in these files (verified 2026-04-06):
+- `tracker.db` — 96 articles, 152 news_articles (142 published, 10 pending), slug history
+- `news.xlsx` — 132KB, all discovered news items with title/url/tags/source columns
+- `articles.xlsx` — 19KB, bulk article topics queue
+
+Do NOT upload output/ (597 folders, too large). HTML paths will be in DB after Task 3.
+
+---
+
+### Task 2 — Excel → SQLite: news pipeline reads from content-studio DB
+
+**Problem:** CG news pipeline reads from `input/news.xlsx`. This is a file on disk — UI can't manage it, EC2 can't sync it.
+
+**Goal:** UI adds news items via `/api/news` → stored in content-studio SQLite → CG pipeline reads from same DB.
+
+**Current state:**
+- content-studio DB (`data/content-studio.db`) has `news_items` table with: id, session_id, title, url, source, tags, published, status
+- CG `tracker.db` has `news_articles` table with: title, slug, competitor_url, tags, source, status, article_path, wp_post_id
+- CG `_read_news_excel()` in `main.py` reads columns: title, competitor_url, tags, source
+
+**What to build:**
+
+**Step 2a — Add `competitor_url` column to content-studio `news_items` table**
+File: `src/lib/server/db.ts`
+```sql
+ALTER TABLE news_items ADD COLUMN competitor_url TEXT DEFAULT '';
+```
+Add to the `news_items` CREATE TABLE definition and run migration.
+
+**Step 2b — Update `/api/news/route.ts` to accept competitor_url in POST body**
+File: `src/app/api/news/route.ts`
+Add `competitor_url` to insert + response.
+
+**Step 2c — Add new CG function: `_read_news_from_db(db_path, session_id, row)`**
+File: `content-generator/src/main.py`
+```python
+def _read_news_from_db(db_path: str, session_id: str, row: int | None = None) -> list[dict]:
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT title, url as competitor_url, tags, source, id
+        FROM news_items
+        WHERE session_id = ? AND status = 'discovered'
+        ORDER BY created_at DESC
+    """, (session_id,))
+    results = []
+    for i, r in enumerate(cur.fetchall(), start=2):
+        if row and i != row:
+            continue
+        results.append({'title': r[0], 'competitor_url': r[1] or '', 'tags': r[2] or '', 'source': r[3] or '', 'row': i, '_db_id': r[4]})
+    conn.close()
+    return results
+```
+
+**Step 2d — Add `--db` option to news command + use DB when --db passed**
+File: `content-generator/src/main.py`
+Add `@click.option("--db", "db_path", ...)` and `@click.option("--session", "session_id", ...)`
+
+**Step 2e — Update pipeline.ts to pass --db and --session instead of --input**
+File: `src/lib/server/pipeline.ts`, `runNewsPipeline()`
+Replace the Excel creation + `--input` flag with:
+```typescript
+const args = ["-u", "-m", "src.main", "news", "--row", "2",
+  "--db", DB_PATH,          // path to content-studio.db
+  "--session", sessionId,   // current session
+  "--status", newsStatus];
+```
+Where `DB_PATH = path.join(process.cwd(), "data/content-studio.db")`
+
+Files to touch: `db.ts`, `src/app/api/news/route.ts`, `content-generator/src/main.py`, `src/lib/server/pipeline.ts`
+
+---
+
+### Task 3 — Store generated HTML file paths in content-studio DB
+
+**Problem:** When CG or ATLAS generates article.html, the path is only on disk. `article/route.ts` scans filesystem each time. No DB record = can't query, filter, or track from UI efficiently.
+
+**Goal:** Every generated article's file path stored in content-studio DB `content` table.
+
+**Current state:**
+- content-studio `content` table has: id, session_id, topic, title, slug, html (inline HTML), status, etc.
+- CG `tracker.db` `articles` table has: `article_path` column (stores path like `output/{slug}/article.html`)
+- ATLAS `runs.json` has path per run
+- `src/app/api/article/route.ts` GET: scans filesystem dirs, reads meta.json per article
+
+**What to build:**
+
+**Step 3a — Add `file_path` and `pipeline` columns to content-studio `content` table**
+File: `src/lib/server/db.ts`
+```sql
+ALTER TABLE content ADD COLUMN file_path TEXT DEFAULT '';
+ALTER TABLE content ADD COLUMN pipeline TEXT DEFAULT 'cg';  -- 'cg' | 'atlas'
+```
+
+**Step 3b — Add `upsertArticlePath()` DB helper**
+File: `src/lib/server/db.ts`
+```typescript
+export function upsertArticlePath(sessionId: string, slug: string, topic: string, 
+  title: string, filePath: string, pipeline: 'cg' | 'atlas', wordCount: number) {
+  // INSERT OR REPLACE into content table with file_path, no inline html stored
+}
+```
+
+**Step 3c — Call upsertArticlePath after generation completes**
+File: `src/app/api/generate/route.ts`
+After pipeline SSE emits `done` stage with article path → call `upsertArticlePath()`
+
+**Step 3d — Update article/route.ts GET to read from DB first, filesystem as fallback**
+File: `src/app/api/article/route.ts`
+```typescript
+// Fast path: DB has file_path → read HTML from that path
+// Fallback: scan filesystem (existing behaviour, for articles not yet in DB)
+```
+
+Files to touch: `db.ts`, `src/app/api/generate/route.ts`, `src/app/api/article/route.ts`
+
+---
+
+### After all 3 tasks — push content-generator + content-studio to GitHub, pull on EC2, restart PM2
 
 ---
 

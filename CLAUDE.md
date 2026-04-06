@@ -89,25 +89,49 @@ I prefer to work in one continuous chat. To make this safe:
 5. **Configuration** — ✅ COMPLETE. 5 sections: Project Settings, API Keys (11 providers), Writing Rules, Industry Presets, Brand & AEO (pre-filled with FindMyCollege data)
 
 ## Current phase
-CG + ATLAS quality hardening — COMPLETE (2026-04-03).
+EC2 data + architecture upgrade — IN PROGRESS (2026-04-06).
+See PROGRESS.md → NEXT for the exact 3-task plan with file names, SQL, and code snippets.
 
-### What was completed this session
-- CG pipeline: H1 title generic-pattern fix (outline_prompt.txt + outliner.py)
-- CG pipeline: YAML colon-fix now covers `title:` lines (was only `heading:`)
-- ATLAS stage 5/6: context-aware data extraction + verification (fees, packages, dates all require qualifying units)
-- ATLAS stage 7: article_type in outline prompt; banned title patterns; `_is_generic_title()` + `_build_fallback_title()` safety net
-- ATLAS stage 9: opening/closing paragraph 3-variant Gemini polish
-- ATLAS stage 10: key-stat callout boxes per article type
-- Smart rewrite: `/api/article/analyze` independent analysis step before rewrite
-- Cover image: `src/lib/client/cover-image.ts` — background + title text overlay via Canvas
-- Smart rewrite auto-fill: `buildSmartRewriteInstructions()` pre-fills targeted fixes when score < 80
+### What was completed (2026-04-06)
+- EC2 fully deployed: app live at http://13.51.193.49
+- content-generator cloned to EC2 at `/home/ubuntu/content-generator/`
+- All APIs confirmed working: Gemini, You.com (api.you.com/v1/search ✅), OpenRouter, HuggingFace, DataForSEO
+- `search_client.py`: fixed infinite recursion bug when all keys rate-limit
+- `main.py`: added `--input` option to `news` command (pipeline.ts passes a temp xlsx)
+- GitHub repos: nishit002/content-studio (public), nishit002/content-generator (private)
 
 ### NEXT task (do first in next session)
-**Rewrite must also regenerate the article title** — currently rewrite keeps the old generic title.
-- Pass current title into `/api/article/analyze` analysis
-- After rewrite, save new title to SQLite + article file
-- Show updated title in UI after rewrite completes
-- See PROGRESS.md → NEXT section for file details
+**3-part EC2 data + architecture upgrade** — full plan in PROGRESS.md → NEXT section.
+Short version:
+1. `scp` local `tracker.db` + `news.xlsx` + `articles.xlsx` to EC2 (local files not on GitHub)
+2. News pipeline: replace Excel with SQLite — UI adds news items → same DB that CG pipeline reads
+3. Article paths: when CG/ATLAS generates article.html, store file path in content-studio DB (no more filesystem scanning)
+
+## content-generator repo (NEW — 2026-04-06)
+- GitHub: nishit002/content-generator (private)
+- EC2 path: `/home/ubuntu/content-generator/`
+- Local path: `/Volumes/NISHIT_PD/content-generator/`
+- Deploy: `git push origin main` from local, then on EC2: `cd /home/ubuntu/content-generator && git pull origin main`
+- Auth for EC2 git pull: use `gh auth token` on Mac to get token, embed in remote URL
+- `.env` on EC2: copied from content-studio `.env.local` (same keys)
+- Local data files NOT in git (gitignored): `data/tracker.db`, `input/news.xlsx`, `input/articles.xlsx`
+
+## EC2 deploy procedure (updated 2026-04-06)
+```bash
+# content-studio changes:
+git push origin main   # from /Volumes/NISHIT_PD/content-studio/
+ssh -i ~/content-studio-key.pem ubuntu@13.51.193.49
+cd /home/ubuntu/content-studio && git pull origin main
+NODE_OPTIONS="--max-old-space-size=1536" npm run build  # only if .tsx/.ts changed
+pm2 restart content-studio
+
+# content-generator changes:
+git push origin main   # from /Volumes/NISHIT_PD/content-generator/
+ssh -i ~/content-studio-key.pem ubuntu@13.51.193.49
+TOKEN=$(gh auth token)  # on Mac first, then paste into EC2 remote URL
+cd /home/ubuntu/content-generator && git pull origin main
+# No restart needed — pipeline.py spawns Python fresh each time
+```
 
 AEO Enhancement Phase — queued after ATLAS stabilises.
 
