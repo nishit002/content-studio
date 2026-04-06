@@ -219,6 +219,27 @@ def _build_queries(blueprint: Blueprint) -> dict[str, list[str]]:
             f"{topic} courses placements NIRF rank {year}",
             f"{topic} prospectus brochure filetype:pdf {year}",
         ]
+    elif blueprint.article_type == "admission_guide":
+        entity_queries += [
+            f"{entity} admission process eligibility {year}",
+            f"{entity} entrance exam cutoff merit list {year}",
+            f"{entity} application form last date {year}",
+            f"{entity} admission notification official site:{entity.split()[0].lower()}.ac.in",
+            f"{entity} seat matrix counselling schedule {year}",
+        ]
+    elif blueprint.article_type == "fee_reference":
+        entity_queries += [
+            f"{entity} fee structure {year}",
+            f"{entity} tuition hostel mess charges {year}",
+            f"{entity} scholarship fee waiver {year}",
+            f"{entity} fee filetype:pdf {year}",
+        ]
+    elif blueprint.article_type == "ranking_list":
+        entity_queries += [
+            f"{entity} NIRF ranking {year}",
+            f"site:nirfindia.org {entity}",
+            f"{entity} ranking parameters score year wise",
+        ]
     elif etype == "career":
         entity_queries += [
             f"{topic} salary scope India {year}",

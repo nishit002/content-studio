@@ -59,6 +59,7 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -231,6 +232,14 @@ def run_pipeline(
                 started=datetime.now().strftime("%Y-%m-%d %H:%M"),
                 status="running",
                 run_dir=str(run_dir))
+
+    # Signal handler — catches SIGTERM (systemd/kill) so runs.json is always updated.
+    # SIGKILL cannot be caught, but this handles the common graceful-shutdown case.
+    def _on_signal(signum, frame):
+        log.error(f"Run {run_id} killed by signal {signum} — marking as failed")
+        _update_run(run_id, status="failed", error=f"Process killed (signal {signum})")
+        sys.exit(1)
+    signal.signal(signal.SIGTERM, _on_signal)
 
     done_stages = _stages_done(run_dir)
     log.info(f"Stages already done: {sorted(done_stages) if done_stages else 'none'}")
