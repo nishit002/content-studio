@@ -23,13 +23,29 @@ export async function GET(req: NextRequest) {
 
   if (view === "discovered") {
     const db = getDb();
-    const items = db
-      .prepare(
-        `SELECT id, title, url, source, tags, published, status, created_at
-         FROM news_items WHERE session_id = ?
+    const runId = req.nextUrl.searchParams.get("runId");
+    let items: unknown[];
+    if (runId) {
+      items = db.prepare(
+        `SELECT id, title, url, source, tags, published, status, run_id, created_at
+         FROM news_items WHERE session_id = ? AND run_id = ?
          ORDER BY created_at DESC LIMIT 200`
-      )
-      .all(sessionId);
+      ).all(sessionId, runId);
+    } else {
+      // Default: show items from the latest completed run only
+      const latestRun = db.prepare(
+        `SELECT id FROM news_runs WHERE session_id = ? ORDER BY started_at DESC LIMIT 1`
+      ).get(sessionId) as { id: string } | undefined;
+      if (latestRun) {
+        items = db.prepare(
+          `SELECT id, title, url, source, tags, published, status, run_id, created_at
+           FROM news_items WHERE session_id = ? AND run_id = ?
+           ORDER BY created_at DESC LIMIT 200`
+        ).all(sessionId, latestRun.id);
+      } else {
+        items = [];
+      }
+    }
     return Response.json({ items });
   }
 
@@ -191,17 +207,21 @@ export async function POST(req: NextRequest) {
     try {
       const items = await discoverNews(sessionId);
 
-      // Store discovered items (dedup by URL)
-      const insertStmt = db.prepare(
-        `INSERT OR IGNORE INTO news_items (id, session_id, title, url, source, tags, published, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'discovered', datetime('now'))`
+      // Store discovered items — upsert so re-discovered URLs update their run_id
+      const upsertStmt = db.prepare(
+        `INSERT INTO news_items (id, session_id, title, url, source, tags, published, status, run_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'discovered', ?, datetime('now'))
+         ON CONFLICT(session_id, url) DO UPDATE SET
+           run_id = excluded.run_id,
+           status = 'discovered',
+           created_at = datetime('now')`
       );
 
       let newCount = 0;
       const tx = db.transaction(() => {
         for (const item of items) {
           const id = uuidv4();
-          const result = insertStmt.run(id, sessionId, item.title, item.url, item.source, item.tags || "", item.published || "");
+          const result = upsertStmt.run(id, sessionId, item.title, item.url, item.source, item.tags || "", item.published || "", runId);
           if (result.changes > 0) newCount++;
         }
       });

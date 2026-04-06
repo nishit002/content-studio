@@ -125,6 +125,7 @@ function migrate(db: Database.Database) {
       tags TEXT DEFAULT '',
       published TEXT DEFAULT '',
       status TEXT DEFAULT 'discovered',
+      run_id TEXT DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE (session_id, url),
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
@@ -310,6 +311,7 @@ function migrate(db: Database.Database) {
   const colMigrations = [
     "ALTER TABLE aeo_prompts ADD COLUMN volume_data TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE aeo_runs ADD COLUMN accuracy_flags TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE news_items ADD COLUMN run_id TEXT NOT NULL DEFAULT ''",
   ];
   for (const sql of colMigrations) {
     try { db.exec(sql); } catch { /* column already exists — safe to ignore */ }
