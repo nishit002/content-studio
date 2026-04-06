@@ -122,25 +122,30 @@ def _extract_clean_text(html: str, url: str) -> tuple[str, str]:
 
 def _validate_entity(clean_text: str, primary_entity: str) -> bool:
     """
-    Returns True if the primary entity name appears in the page text.
-    Case-insensitive. Also checks common abbreviations.
-    E.g. "IIM Ahmedabad" also checks "IIMA", "IIM-A".
+    Returns True if the primary entity name appears at least TWICE in the page text.
+    Requiring 2+ occurrences prevents ranking/list pages (where an entity appears once
+    in a table row) from passing validation as a source about that entity.
+    E.g. "Top 50 Medical Institutes" page lists RUHS once → rejected.
+    RUHS's own admission page has it in title + heading + intro → passes.
+    Also checks common abbreviations (acronym, compact form).
     """
     if not primary_entity:
         return True  # no validation configured
     entity_lower = primary_entity.lower()
     text_lower = clean_text.lower()
-    if entity_lower in text_lower:
+
+    # Full name must appear at least twice
+    if text_lower.count(entity_lower) >= 2:
         return True
-    # Try with commas stripped from text (e.g. "Amity University, Noida" → "Amity University Noida")
+    # Try with commas stripped (e.g. "Amity University, Noida" → "Amity University Noida")
     text_no_comma = text_lower.replace(",", " ").replace("  ", " ")
-    if entity_lower in text_no_comma:
+    if text_no_comma.count(entity_lower) >= 2:
         return True
-    # Try without spaces (e.g. "IIM Ahmedabad" → "iimahmedabad")
+    # Try without spaces (e.g. "IIM Ahmedabad" → "iimahmedabad") — existence check only
     compact = entity_lower.replace(" ", "")
     if compact in text_lower:
         return True
-    # Try acronym: first letter of each word (e.g. "IIM Ahmedabad" → "IIMA")
+    # Try acronym: first letter of each word (e.g. "IIM Ahmedabad" → "IIMA") — existence check only
     words = primary_entity.split()
     if len(words) >= 2:
         acronym = "".join(w[0] for w in words).lower()

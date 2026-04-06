@@ -173,6 +173,14 @@ def run(
         log.warning(f"Stage 7: generic h1_title detected → replacing with: {fixed}")
         result["h1_title"] = fixed
 
+    # Catch article-type mismatch in h1_title
+    # e.g. Gemini generates "RUHS Placements 2024: Top Recruiters" for an admission_guide article
+    h1 = result.get("h1_title", "")  # refresh after possible generic fix above
+    if _is_type_mismatch(h1, blueprint.article_type):
+        fixed = _build_fallback_title(blueprint.primary_entity, blueprint.article_type)
+        log.warning(f"Stage 7: type-mismatch in h1_title ('{h1[:60]}') → replacing with: {fixed}")
+        result["h1_title"] = fixed
+
     # Deduplicate sub_topic_ids across sections — each id must appear in at most one section
     seen_ids: set[str] = set()
     for section in result["sections"]:
@@ -208,6 +216,26 @@ def _is_generic_title(title: str, entity: str) -> bool:
     """Return True if the title matches a banned generic pattern."""
     t = title.lower()
     return any(pat in t for pat in _GENERIC_TITLE_PATTERNS)
+
+
+# Words that should NOT appear in a title for the given article type.
+# Catches Gemini drifting to the wrong article angle (e.g. writing a "Placements" title
+# for an admission_guide article because wrong source pages slipped through validation).
+_TYPE_MISMATCH_FORBIDDEN: dict[str, list[str]] = {
+    "admission_guide": ["placement", "salary", "package", "recruiters", "ctc", "lpa"],
+    "fee_reference":   ["placement", "salary", "recruiters", "ctc"],
+    "ranking_list":    ["placement", "salary", "package", "recruiters"],
+    "exam_guide":      ["placement", "salary", "package", "recruiters"],
+}
+
+
+def _is_type_mismatch(title: str, article_type: str) -> bool:
+    """Return True if the h1_title clearly belongs to a different article type."""
+    t = title.lower()
+    for bad_word in _TYPE_MISMATCH_FORBIDDEN.get(article_type, []):
+        if bad_word in t:
+            return True
+    return False
 
 
 _FALLBACK_TITLE_TEMPLATES: dict[str, str] = {
