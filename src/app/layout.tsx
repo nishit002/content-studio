@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Content Studio — AI Content Generation & Optimization",
+  title: "Kuntak — AI Content Generation & Optimization",
   description:
     "Generate, optimize, and manage content at scale with AEO, GEO, and SEO intelligence.",
 };

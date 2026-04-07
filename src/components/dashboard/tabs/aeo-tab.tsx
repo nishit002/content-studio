@@ -217,7 +217,7 @@ function AeoAuditPanel({ onGenerate }: { onGenerate: (s: AeoSuggestions) => void
             </div>
             {report.checks.some((c) => !c.pass) && (
               <button onClick={handleGenerate} className="cs-btn cs-btn-primary shrink-0">
-                Generate Fixes with Content Studio →
+                Generate Fixes with Kuntak →
               </button>
             )}
           </div>
