@@ -55,7 +55,7 @@ export default function LoginPage() {
       <div className="w-full max-w-sm">
         {/* Logo / title */}
         <div className="text-center mb-8">
-          <div className="text-2xl font-bold text-white tracking-tight">Kuntak</div>
+          <div className="text-2xl font-bold text-white tracking-tight">Content Studio</div>
           <div className="text-sm text-gray-400 mt-1">Sign in to continue</div>
         </div>
 

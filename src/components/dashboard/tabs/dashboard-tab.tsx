@@ -219,7 +219,7 @@ export default function DashboardTab({ onNavigate }: { onNavigate: (tab: TabKey)
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-lg font-bold text-th-text">
-                {articleCount === 0 ? "Welcome to Kuntak" : "Your Content at a Glance"}
+                {articleCount === 0 ? "Welcome to Content Studio" : "Your Content at a Glance"}
               </h2>
               <p className="text-xs text-th-text-muted mt-1 max-w-md">
                 {articleCount === 0

@@ -123,7 +123,7 @@ export function ContentStudioDashboard() {
       <div className="flex h-screen items-center justify-center bg-th-bg">
         <div className="flex flex-col items-center gap-3">
           <div className="w-10 h-10 rounded-full border-2 border-th-accent border-t-transparent animate-spin" />
-          <p className="text-th-text-muted text-sm">Loading Kuntak...</p>
+          <p className="text-th-text-muted text-sm">Loading Content Studio...</p>
         </div>
       </div>
     );
@@ -141,7 +141,7 @@ export function ContentStudioDashboard() {
           </div>
           {!collapsed && (
             <div className="min-w-0">
-              <h1 className="text-sm font-semibold text-th-text truncate">Kuntak</h1>
+              <h1 className="text-sm font-semibold text-th-text truncate">Content Studio</h1>
               <p className="text-xs text-th-text-muted">AI-Powered Content</p>
             </div>
           )}
