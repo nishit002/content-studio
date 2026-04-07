@@ -236,7 +236,24 @@ function seedDefaults(sessionId: string) {
   if (indexingKey) upsertApiKey(sessionId, "google_indexing", indexingKey, "Indexing API");
 
   /* ═══════════════════════════════════════════════════════════
-   * 3. NEWS RSS FEEDS — all feeds from settings.yaml
+   * 3. AEO BRAND CONFIG — FindMyCollege defaults
+   * ═══════════════════════════════════════════════════════════ */
+  db.prepare(`INSERT OR IGNORE INTO aeo_brand_config
+    (session_id, brand_name, aliases, website, industry, keywords, description, competitors, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`)
+    .run(
+      sessionId,
+      "FindMyCollege",
+      "FMC, findmycollege.com",
+      "https://findmycollege.com",
+      "EdTech, College Admissions, Higher Education",
+      "top MBA colleges India, best engineering colleges, NIRF ranking, college fees, admission process, college cutoffs, top universities India",
+      "FindMyCollege is India's leading college discovery and comparison platform, helping students find the best colleges for MBA, Engineering, Medical, Law, and other programs based on rankings, fees, placements, and admission requirements.",
+      "Shiksha, Collegedunia, Careers360, CollegeDekho, GetMyUni"
+    );
+
+  /* ═══════════════════════════════════════════════════════════
+   * 4. NEWS RSS FEEDS — all feeds from settings.yaml
    * ═══════════════════════════════════════════════════════════ */
   const newsFeeds: [string, string, string, string][] = [
     // [name, url, type, category]
