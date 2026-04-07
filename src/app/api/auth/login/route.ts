@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
 
-const SECRET    = process.env.AUTH_SECRET    ?? 'cs-auth-secret-change-me'
-const ADMIN_USER = process.env.ADMIN_USERNAME ?? 'fmcteam'
-const ADMIN_PASS = process.env.ADMIN_PASSWORD ?? 'fmccontent123'
+const SECRET     = '1964329cc06753b304c1fff6d1156bfd1374b23b79a3235743a2d06ad661dfb1'
+const ADMIN_USER = 'fmcteam'
+const ADMIN_PASS = 'fmccontent123'
 const COOKIE_TTL = 7 * 24 * 60 * 60  // 7 days in seconds
 
 /** Constant-time string comparison (pads both to 200 chars). */

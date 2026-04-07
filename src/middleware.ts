@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
 
-const SECRET = process.env.AUTH_SECRET ?? 'cs-auth-secret-change-me'
+const SECRET = '1964329cc06753b304c1fff6d1156bfd1374b23b79a3235743a2d06ad661dfb1'
 
 function isValidToken(token: string): boolean {
   const dot = token.lastIndexOf('.')
