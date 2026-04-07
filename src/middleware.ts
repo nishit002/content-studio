@@ -1,22 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import crypto from 'crypto'
 
-const SECRET = '1964329cc06753b304c1fff6d1156bfd1374b23b79a3235743a2d06ad661dfb1'
-
-function isValidToken(token: string): boolean {
-  const dot = token.lastIndexOf('.')
-  if (dot === -1) return false
-  const payload = token.slice(0, dot)
-  const sig     = token.slice(dot + 1)
-  try {
-    const expected = crypto.createHmac('sha256', SECRET).update(payload).digest('hex')
-    const a = Buffer.from(sig.padEnd(64, '0').slice(0, 64), 'hex')
-    const b = Buffer.from(expected, 'hex')
-    return a.length === b.length && crypto.timingSafeEqual(a, b)
-  } catch {
-    return false
-  }
-}
+// Must match VALID_TOKEN in src/app/api/auth/login/route.ts
+const VALID_TOKEN = '50e50a8e5f68e86974b62d73cd996b6cd67ab54b074fa146db3788dd1fbcc508'
 
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl
@@ -32,9 +17,8 @@ export function middleware(req: NextRequest) {
   }
 
   const token = req.cookies.get('cs_auth')?.value
-  if (!token || !isValidToken(token)) {
-    const loginUrl = new URL('/login', req.url)
-    return NextResponse.redirect(loginUrl)
+  if (token !== VALID_TOKEN) {
+    return NextResponse.redirect(new URL('/login', req.url))
   }
 
   return NextResponse.next()

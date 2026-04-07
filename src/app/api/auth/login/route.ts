@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'crypto'
 
-const SECRET     = '1964329cc06753b304c1fff6d1156bfd1374b23b79a3235743a2d06ad661dfb1'
+// Static credentials
 const ADMIN_USER = 'fmcteam'
 const ADMIN_PASS = 'fmccontent123'
-const COOKIE_TTL = 7 * 24 * 60 * 60  // 7 days in seconds
+const COOKIE_TTL = 7 * 24 * 60 * 60  // 7 days
+
+// Pre-computed session token — same value used in middleware.ts
+// If you change this, change it in middleware.ts too and users must re-login.
+export const VALID_TOKEN = '50e50a8e5f68e86974b62d73cd996b6cd67ab54b074fa146db3788dd1fbcc508'
 
 /** Constant-time string comparison (pads both to 200 chars). */
 function safeEq(a: string, b: string): boolean {
@@ -13,30 +17,7 @@ function safeEq(a: string, b: string): boolean {
   return crypto.timingSafeEqual(aBuf, bBuf) && a.length === b.length
 }
 
-/** Create a signed auth token: "payload.hmac" */
-function createToken(): string {
-  const payload = `admin.${Date.now()}`
-  const sig = crypto.createHmac('sha256', SECRET).update(payload).digest('hex')
-  return `${payload}.${sig}`
-}
-
-/** Verify a signed auth token. */
-export function verifyToken(token: string): boolean {
-  const dot = token.lastIndexOf('.')
-  if (dot === -1) return false
-  const payload = token.slice(0, dot)
-  const sig     = token.slice(dot + 1)
-  try {
-    const expected = crypto.createHmac('sha256', SECRET).update(payload).digest('hex')
-    const a = Buffer.from(sig.padEnd(64, '0').slice(0, 64), 'hex')
-    const b = Buffer.from(expected, 'hex')
-    return a.length === b.length && crypto.timingSafeEqual(a, b)
-  } catch {
-    return false
-  }
-}
-
-// POST /api/auth/login — validate credentials + captcha, set cookie
+// POST /api/auth/login — validate credentials + captcha, set session cookie
 export async function POST(req: NextRequest) {
   const { username = '', password = '', captchaA, captchaB, captchaAnswer } = await req.json()
 
@@ -54,7 +35,7 @@ export async function POST(req: NextRequest) {
   }
 
   const res = NextResponse.json({ ok: true })
-  res.cookies.set('cs_auth', createToken(), {
+  res.cookies.set('cs_auth', VALID_TOKEN, {
     httpOnly: true,
     sameSite: 'lax',
     maxAge: COOKIE_TTL,
