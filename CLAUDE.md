@@ -89,23 +89,37 @@ I prefer to work in one continuous chat. To make this safe:
 5. **Configuration** — ✅ COMPLETE. 5 sections: Project Settings, API Keys (11 providers), Writing Rules, Industry Presets, Brand & AEO (pre-filled with FindMyCollege data)
 
 ## Current phase
-EC2 data + architecture upgrade — IN PROGRESS (2026-04-06).
-See PROGRESS.md → NEXT for the exact 3-task plan with file names, SQL, and code snippets.
+Login is DONE. Next: signup module + admin panel.
+See PROGRESS.md → NEXT for pending tasks.
 
-### What was completed (2026-04-06)
-- EC2 fully deployed: app live at http://13.51.193.49
-- content-generator cloned to EC2 at `/home/ubuntu/content-generator/`
-- All APIs confirmed working: Gemini, You.com (api.you.com/v1/search ✅), OpenRouter, HuggingFace, DataForSEO
-- `search_client.py`: fixed infinite recursion bug when all keys rate-limit
-- `main.py`: added `--input` option to `news` command (pipeline.ts passes a temp xlsx)
-- GitHub repos: nishit002/content-studio (public), nishit002/content-generator (private)
+## Login module (COMPLETE — 2026-04-07 session 5)
+- `/login` — username + password + math CAPTCHA
+- Credentials: `fmcteam` / `fmccontent123`
+- `src/middleware.ts` — blocks all routes; allows `/login` + `/api/auth/`
+- Token: static pre-computed string (NOT HMAC — Edge Runtime doesn't support `crypto.createHmac`)
+- `VALID_TOKEN` must match in BOTH `src/middleware.ts` AND `src/app/api/auth/login/route.ts`
+- Logout: `GET /api/auth/logout` (linked from dashboard header)
+- **DO NOT use crypto.createHmac in middleware** — Edge Runtime only has Web Crypto API
 
-### NEXT task (do first in next session)
-**3-part EC2 data + architecture upgrade** — full plan in PROGRESS.md → NEXT section.
-Short version:
-1. `scp` local `tracker.db` + `news.xlsx` + `articles.xlsx` to EC2 (local files not on GitHub)
-2. News pipeline: replace Excel with SQLite — UI adds news items → same DB that CG pipeline reads
-3. Article paths: when CG/ATLAS generates article.html, store file path in content-studio DB (no more filesystem scanning)
+## CG outliner fix (COMPLETE — 2026-04-07 session 5)
+- `outline_prompt.txt` has literal `{entity}`, `{exam}` etc. examples → Python `.format()` crashed every outline
+- Fix: `_safe_prompt()` in `content-generator/src/outliner.py` escapes unknown placeholders before `.format()`
+- `import re` added at top level of `outliner.py`
+
+## ATLAS previous runs panel (COMPLETE — 2026-04-07 session 5)
+- `GET /api/article?atlasRuns=true` — reads `runs.json`, returns all runs with checkpoint progress
+- Single ATLAS tab shows panel with status badges + View/Resume/Retry buttons
+- Resume works because atlas.py auto-resumes any non-done run for the same topic
+- Stage 8 (writing) resumes per-section: loads existing `.html` checkpoints, writes only missing sections
+
+### What was completed (2026-04-07) — ATLAS + CG article quality hardening
+- **ATLAS entity validation fix** — acronym generator skips stop words (RUHS not RUOHS); was causing 61/89 pages to fail validation → thin 500-word articles. Now pages with RUHS/BHU/IIT abbreviations pass correctly.
+- **No TOC** — removed `<nav class="toc">` from ATLAS article output (`stage10_coherence.py`)
+- **Concise headings** — section headings changed from sentence-style statements to 5-12 word keyword/topic phrases across ATLAS (`stage7_outline.py`), CG (`outline_prompt.txt`), and News (`news_prompt.txt`)
+- **Direct opening paragraph** — first `<p>` after each heading must jump to the key fact, not re-introduce the institution (`stage8_write.py` rule 9)
+- **Default year = 2026** — ATLAS no longer defaults to null year; 2026 used when topic doesn't specify (`stage1_blueprint.py`)
+- **Dead run cleanup** — runs 004 + 006 marked failed in runs.json (dead processes cleaned up)
+- All fixes deployed to EC2 (content-studio + content-generator both pulled)
 
 ## content-generator repo (NEW — 2026-04-06)
 - GitHub: nishit002/content-generator (private)
