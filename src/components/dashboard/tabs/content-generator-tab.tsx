@@ -112,6 +112,17 @@ interface AeoSuggestions {
   fromUrl: string;
 }
 
+interface AtlasRun {
+  id: string;
+  topic: string;
+  status: "running" | "done" | "failed" | "unknown";
+  articleType: string | null;
+  started: string;
+  checkpoint: string;
+  error: string | null;
+  slug: string | null;
+}
+
 interface PastRun {
   id: string;
   name: string;
@@ -154,6 +165,8 @@ export function ContentGeneratorTab({
   const [resultTab, setResultTab] = useState<ResultTab>("preview");
   const [recentArticles, setRecentArticles] = useState<ArticleListItem[]>([]);
   const [loadingList, setLoadingList] = useState(true);
+  const [atlasRunsList, setAtlasRunsList] = useState<AtlasRun[]>([]);
+  const [atlasRunsLoading, setAtlasRunsLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [visibleCount, setVisibleCount] = useState(20);
@@ -186,7 +199,17 @@ export function ContentGeneratorTab({
       .finally(() => setLoadingList(false));
   }, []);
 
+  const loadAtlasRuns = useCallback(() => {
+    setAtlasRunsLoading(true);
+    fetch("/api/article?atlasRuns=true")
+      .then((r) => r.json())
+      .then((data: AtlasRun[]) => setAtlasRunsList(data))
+      .catch(() => {})
+      .finally(() => setAtlasRunsLoading(false));
+  }, []);
+
   useEffect(() => { loadArticles(); }, [loadArticles]);
+  useEffect(() => { if (pipeline === "atlas") loadAtlasRuns(); }, [pipeline, loadAtlasRuns]);
 
   const loadPastRuns = useCallback(() => {
     setPastRunsLoading(true);
@@ -284,6 +307,7 @@ export function ContentGeneratorTab({
             if (event.stage === "done" && event.detail) {
               setResult((prev) => ({ ...(prev ?? {}), ...event.detail }));
               onArticleGenerated?.();
+              loadAtlasRuns();
               // For ATLAS: load article when slug is emitted
               const atlasSlug = event.detail?.atlasSlug as string | undefined;
               if (atlasSlug) {
@@ -1893,6 +1917,70 @@ export function ContentGeneratorTab({
                 <p className="text-xs text-th-text-muted">{t.desc}</p>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── ATLAS Previous Runs ── */}
+      {!generating && pipeline === "atlas" && atlasRunsList.length > 0 && (
+        <div className="cs-card p-4 mb-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-th-text">Previous ATLAS Runs</h3>
+            <button onClick={loadAtlasRuns} className="text-xs text-th-text-muted hover:text-th-text transition-colors">
+              {atlasRunsLoading ? "Refreshing…" : "↻ Refresh"}
+            </button>
+          </div>
+          <div className="space-y-2 max-h-64 overflow-y-auto">
+            {atlasRunsList.slice(0, 20).map((run) => {
+              const statusColor =
+                run.status === "done"    ? "text-green-400 bg-green-950/40 border-green-900/40" :
+                run.status === "running" ? "text-blue-400 bg-blue-950/40 border-blue-900/40" :
+                run.status === "failed"  ? "text-red-400 bg-red-950/40 border-red-900/40" :
+                                           "text-gray-400 bg-gray-800/40 border-gray-700/40";
+              const checkpointLabel: Record<string, string> = {
+                done: "Complete", writing: "Stage 8 — Writing", outline: "Stage 7 — Outline",
+                verified: "Stage 6 — Verified", blueprint: "Stage 1 — Blueprint", queued: "Not started",
+              };
+              return (
+                <div key={run.id} className="flex items-center gap-3 p-2.5 rounded-lg bg-th-bg border border-th-border text-xs">
+                  <span className="text-th-text-muted font-mono w-8 shrink-0">#{run.id}</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-th-text truncate font-medium">{run.topic}</p>
+                    <p className="text-th-text-muted">{run.started} · {checkpointLabel[run.checkpoint] ?? run.checkpoint}</p>
+                    {run.error && <p className="text-red-400 truncate">{run.error}</p>}
+                  </div>
+                  <span className={`px-2 py-0.5 rounded border text-xs font-medium shrink-0 ${statusColor}`}>
+                    {run.status}
+                  </span>
+                  <div className="flex gap-1.5 shrink-0">
+                    {run.status === "done" && run.slug && (
+                      <button
+                        onClick={() => viewArticle(run.slug!)}
+                        className="px-2 py-1 rounded bg-th-accent/10 hover:bg-th-accent/20 text-th-accent border border-th-accent/30 transition-colors"
+                      >
+                        View
+                      </button>
+                    )}
+                    {(run.status === "failed" || run.status === "running") && (
+                      <button
+                        onClick={() => { setTopic(run.topic); if (run.articleType) setArticleType(run.articleType); }}
+                        className="px-2 py-1 rounded bg-blue-950/40 hover:bg-blue-900/40 text-blue-400 border border-blue-900/40 transition-colors"
+                      >
+                        {run.status === "running" ? "Reconnect" : "Resume"}
+                      </button>
+                    )}
+                    {run.status === "failed" && (
+                      <button
+                        onClick={() => { setTopic(run.topic); if (run.articleType) setArticleType(run.articleType); }}
+                        className="px-2 py-1 rounded bg-th-danger/10 hover:bg-th-danger/20 text-th-danger border border-th-danger/30 transition-colors"
+                      >
+                        Retry
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

@@ -19,9 +19,43 @@ const ATLAS_OUTPUT_DIR = path.join(ATLAS_DIR, "output");
 export async function GET(req: NextRequest) {
   await getSession(); // validate session
 
-  const list = req.nextUrl.searchParams.get("list");
-  const slug = req.nextUrl.searchParams.get("slug");
-  const part = req.nextUrl.searchParams.get("part") || "all";
+  const list       = req.nextUrl.searchParams.get("list");
+  const atlasRuns  = req.nextUrl.searchParams.get("atlasRuns");
+  const slug       = req.nextUrl.searchParams.get("slug");
+  const part       = req.nextUrl.searchParams.get("part") || "all";
+
+  // Return ATLAS runs list with status (running / done / failed)
+  if (atlasRuns === "true") {
+    const runsPath = path.join(ATLAS_OUTPUT_DIR, "runs.json");
+    if (!fs.existsSync(runsPath)) return Response.json([]);
+    try {
+      const raw = JSON.parse(fs.readFileSync(runsPath, "utf-8")) as Record<string, Record<string, unknown>>;
+      const runs = Object.entries(raw)
+        .map(([id, r]) => {
+          const runDir = path.join(ATLAS_DIR, String(r.run_dir ?? `output/${id}-unknown`));
+          // Detect checkpoint stage
+          let checkpoint = "queued";
+          if (fs.existsSync(path.join(runDir, "article.html")))        checkpoint = "done";
+          else if (fs.existsSync(path.join(runDir, "sections")))       checkpoint = "writing";
+          else if (fs.existsSync(path.join(runDir, "outline.json")))   checkpoint = "outline";
+          else if (fs.existsSync(path.join(runDir, "verified_data.json"))) checkpoint = "verified";
+          else if (fs.existsSync(path.join(runDir, "blueprint.json"))) checkpoint = "blueprint";
+
+          return {
+            id,
+            topic:      String(r.topic ?? ""),
+            status:     String(r.status ?? "unknown"),
+            articleType: r.type ? String(r.type) : null,
+            started:    String(r.started ?? ""),
+            checkpoint,
+            error:      r.error ? String(r.error) : null,
+            slug:       r.run_dir ? String(r.run_dir).replace(/^output\/\d+-/, "") : null,
+          };
+        })
+        .sort((a, b) => b.id.localeCompare(a.id)); // newest first
+      return Response.json(runs);
+    } catch { return Response.json([]); }
+  }
 
   // List all generated articles
   if (list === "true") {
