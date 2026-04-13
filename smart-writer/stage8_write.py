@@ -15,6 +15,8 @@ Rules:
 """
 
 from __future__ import annotations
+import concurrent.futures
+import threading as _threading
 
 import json
 import logging
@@ -109,39 +111,38 @@ def run(
     # Build lookup: sub_topic_id → VerifiedSubTopic
     vst_map: dict[str, VerifiedSubTopic] = {v.sub_topic_id: v for v in verified_subtopics}
 
-    client = QwenClient()
-    written: list[WrittenSection] = []
-    already_covered: list[str] = []
+    # Pre-compute already_covered for each section from outline headings
+    # (topic-level anti-repetition — safe to pre-compute since we know the full outline)
+    # Section 0 (first) gets "None — this is the first section." for the article intro trigger
+    def _already_covered_for(i: int) -> str:
+        if i == 0:
+            return "None — this is the first section."
+        return "\n".join(
+            f"Section {j+1}: {outline.sections[j].heading} — covered: " + ", ".join(outline.sections[j].sub_topic_ids)
+            for j in range(i)
+        )
 
-    for i, section in enumerate(outline.sections):
+    _write_lock = _threading.Lock()
+
+    def _write_section(args) -> tuple[int, WrittenSection | None]:
+        i, section = args
         slug = _heading_slug(section.heading)
         checkpoint = sections_dir / f"{i:02d}_{slug}.html"
 
         if checkpoint.exists():
             log.info(f"  Stage 8 [{i+1}]: loading from checkpoint: {section.heading[:50]}")
             html = checkpoint.read_text(encoding="utf-8")
-            wc = _word_count(html)
-            ws = WrittenSection(
-                heading=section.heading,
-                level=section.level,
-                html=html,
-                word_count=wc,
-            )
-            written.append(ws)
-            already_covered.append(f"Section {i+1}: {section.heading}")
-            continue
+            return i, WrittenSection(heading=section.heading, level=section.level,
+                                     html=html, word_count=_word_count(html))
 
-        # Build verified data block for this section
         data_block = _build_data_block(section, vst_map)
-
         if not data_block.strip() or data_block == "No verified data available.":
-            log.warning(f"  Stage 8 [{i+1}]: NO verified data — DROPPING section: {section.heading}")
-            continue
+            log.warning(f"  Stage 8 [{i+1}]: NO verified data — DROPPING: {section.heading}")
+            return i, None
 
         log.info(f"  Stage 8 [{i+1}]: writing: {section.heading[:60]}")
-
-        # Temperature: lower for table-heavy, higher for prose
         temp = 0.3 if section.section_type == "table" else 0.45
+        already_covered_str = _already_covered_for(i)
 
         prompt = WRITER_PROMPT.format(
             heading=section.heading,
@@ -150,39 +151,29 @@ def run(
             format_hint=section.format_hint or section.section_type,
             focus_keyword=outline.focus_keyword,
             verified_data_block=data_block.replace("{", "{{").replace("}", "}}"),
-            already_covered=("\n".join(already_covered) if already_covered else "None — this is the first section.").replace("{", "{{").replace("}", "}}"),
+            already_covered=already_covered_str.replace("{", "{{").replace("}", "}}"),
         )
 
-        html = client.generate(
-            system=WRITER_SYSTEM,
-            user=prompt,
-            temperature=temp,
-            max_tokens=8000,
-        )
-
-        # Clean up common Qwen/LLM output artifacts
+        client = QwenClient()  # each thread gets own client; HF key rotation is instance-level
+        html = client.generate(system=WRITER_SYSTEM, user=prompt, temperature=temp, max_tokens=8000)
         html = _clean_html(html, section.heading, section.level)
-
-        # Ensure heading tag is present
         if not html.strip().startswith("<h"):
             tag = f"h{section.level}"
             html = f"<{tag}>{section.heading}</{tag}>\n{html}"
 
-        # Save checkpoint
-        checkpoint.write_text(html, encoding="utf-8")
+        with _write_lock:
+            checkpoint.write_text(html, encoding="utf-8")
 
         wc = _word_count(html)
         log.info(f"  Stage 8 [{i+1}]: written {wc} words")
+        return i, WrittenSection(heading=section.heading, level=section.level, html=html, word_count=wc)
 
-        ws = WrittenSection(
-            heading=section.heading,
-            level=section.level,
-            html=html,
-            word_count=wc,
-        )
-        written.append(ws)
-        already_covered.append(f"Section {i+1}: {section.heading} — covered: "
-                                + ", ".join(section.sub_topic_ids))
+    # Parallel: 2 workers (2 HF tokens = 2 simultaneous Qwen calls; fallback uses Gemini key rotation)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = list(pool.map(_write_section, enumerate(outline.sections)))
+
+    # Restore original section order (pool.map preserves order)
+    written = [ws for _, ws in futures if ws is not None]
 
     total_words = sum(s.word_count for s in written)
     log.info(f"Stage 8: {len(written)} sections written, {total_words} total words")

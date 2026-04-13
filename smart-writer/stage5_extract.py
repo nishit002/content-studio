@@ -17,6 +17,8 @@ Why targeted extraction beats "extract everything":
 """
 
 from __future__ import annotations
+import concurrent.futures
+import threading as _threading
 
 import json
 import logging
@@ -117,54 +119,46 @@ def run(
         log.warning("Stage 5: no validated pages to extract from")
         return []
 
-    client = GeminiClient()
-    results: list[SubTopicExtraction] = []
+    # ── Parallel extraction: one GeminiClient per thread (key rotation is module-level) ──
+    _ckpt_lock = _threading.Lock()
 
-    for st in blueprint.sub_topics:
+    def _extract_one(st) -> SubTopicExtraction:
         checkpoint = extracted_dir / f"{st.id}.json"
-
         if checkpoint.exists():
             log.info(f"  Stage 5 [{st.id}]: loading from checkpoint")
             data = json.loads(checkpoint.read_text(encoding="utf-8"))
-            results.append(SubTopicExtraction(
+            return SubTopicExtraction(
                 sub_topic_id=data["sub_topic_id"],
                 source_urls=data["source_urls"],
                 data=data["data"],
                 raw_tables=data.get("raw_tables", []),
                 extraction_notes=data.get("extraction_notes", ""),
-            ))
-            continue
+            )
 
-        # Get pages assigned to this sub-topic
         st_urls = source_list.by_sub_topic.get(st.id, [])
         st_pages = [pages[u] for u in st_urls if u in pages]
 
         if not st_pages:
-            log.warning(f"  Stage 5 [{st.id}]: no validated pages — skipping extraction")
-            results.append(SubTopicExtraction(
-                sub_topic_id=st.id,
-                source_urls=[],
+            log.warning(f"  Stage 5 [{st.id}]: no validated pages — skipping")
+            return SubTopicExtraction(
+                sub_topic_id=st.id, source_urls=[],
                 data={f: None for f in st.data_needed},
-                raw_tables=[],
-                extraction_notes="No validated pages available for this sub-topic",
-            ))
-            continue
+                raw_tables=[], extraction_notes="No validated pages available",
+            )
 
         log.info(f"  Stage 5 [{st.id}]: extracting from {len(st_pages)} pages")
-
-        # Build pages text block (truncate to keep prompt manageable)
         pages_text = _build_pages_text(st_pages, max_chars_per_page=3000)
-
         prompt = EXTRACT_PROMPT.format(
             sub_topic_name=st.name,
             data_needed=", ".join(st.data_needed),
             pages_text=pages_text.replace("{", "{{").replace("}", "}}"),
         )
 
+        client = GeminiClient()  # each thread gets own client; key rotation is module-level+thread-safe
         try:
             result = client.generate_json(prompt, temperature=0.1, max_tokens=8192)
         except Exception as e:
-            log.warning(f"  Stage 5 [{st.id}]: Gemini extraction failed: {e}")
+            log.warning(f"  Stage 5 [{st.id}]: Gemini failed: {e}")
             result = {"data": {}, "raw_tables": [], "extraction_notes": f"Gemini error: {e}"}
 
         extraction = SubTopicExtraction(
@@ -174,25 +168,35 @@ def run(
             raw_tables=result.get("raw_tables", []),
             extraction_notes=result.get("extraction_notes", ""),
         )
-
-        # Save checkpoint
-        checkpoint.write_text(
-            json.dumps({
-                "sub_topic_id": st.id,
-                "source_urls": extraction.source_urls,
-                "data": extraction.data,
-                "raw_tables": extraction.raw_tables,
-                "extraction_notes": extraction.extraction_notes,
-            }, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
+        with _ckpt_lock:
+            checkpoint.write_text(
+                json.dumps({
+                    "sub_topic_id": st.id,
+                    "source_urls": extraction.source_urls,
+                    "data": extraction.data,
+                    "raw_tables": extraction.raw_tables,
+                    "extraction_notes": extraction.extraction_notes,
+                }, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         non_null = sum(1 for v in extraction.data.values() if v is not None)
-        log.info(f"  Stage 5 [{st.id}]: {non_null}/{len(st.data_needed)} fields extracted, "
-                 f"{len(extraction.raw_tables)} tables")
-        results.append(extraction)
+        log.info(f"  Stage 5 [{st.id}]: {non_null}/{len(st.data_needed)} fields, {len(extraction.raw_tables)} tables")
+        return extraction
 
-    log.info(f"Stage 5: done — {len(results)} sub-topics extracted")
+    # Run all sub-topics in parallel (max 3 workers = one per Gemini key)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {pool.submit(_extract_one, st): st.id for st in blueprint.sub_topics}
+        # Preserve original sub-topic order
+        id_to_result = {}
+        for fut in concurrent.futures.as_completed(futures):
+            st_id = futures[fut]
+            try:
+                id_to_result[st_id] = fut.result()
+            except Exception as e:
+                log.error(f"  Stage 5 [{st_id}]: worker crashed: {e}")
+
+    results = [id_to_result[st.id] for st in blueprint.sub_topics if st.id in id_to_result]
+    log.info(f"Stage 5: done — {len(results)}/{len(blueprint.sub_topics)} sub-topics extracted")
     return results
 
 

@@ -18,6 +18,8 @@ Hallucination can only happen if:
 """
 
 from __future__ import annotations
+import concurrent.futures
+import threading as _threading
 
 import json
 import logging
@@ -121,60 +123,40 @@ def run(
         log.warning("Stage 6: no extractions to verify")
         return []
 
-    client = GeminiClient()
-    results: list[VerifiedSubTopic] = []
-
-    # Build a lookup: sub_topic_id → SubTopic (for names)
     st_name_map = {st.id: st.name for st in blueprint.sub_topics}
+    _ckpt_lock = _threading.Lock()
 
-    for extraction in extractions:
+    def _verify_one(extraction) -> VerifiedSubTopic:
         st_name = st_name_map.get(extraction.sub_topic_id, extraction.sub_topic_id)
         log.info(f"  Stage 6 [{extraction.sub_topic_id}]: verifying")
 
-        # Skip if nothing was extracted
         extracted_fields = {k: v for k, v in extraction.data.items() if v is not None}
         if not extracted_fields and not extraction.raw_tables:
             log.info(f"  Stage 6 [{extraction.sub_topic_id}]: nothing to verify — marking empty")
-            results.append(VerifiedSubTopic(
-                sub_topic_id=extraction.sub_topic_id,
-                sub_topic_name=st_name,
-                verified_facts=[],
-                verified_tables=[],
-                has_data=False,
-            ))
-            continue
+            return VerifiedSubTopic(sub_topic_id=extraction.sub_topic_id, sub_topic_name=st_name,
+                                    verified_facts=[], verified_tables=[], has_data=False)
 
-        # Build source text for verification
         source_pages = [pages[u] for u in extraction.source_urls if u in pages]
         source_text = _build_source_text(source_pages, max_chars=5000)
-
         if not source_text:
-            log.warning(f"  Stage 6 [{extraction.sub_topic_id}]: no source text available — marking unverified")
-            results.append(VerifiedSubTopic(
-                sub_topic_id=extraction.sub_topic_id,
-                sub_topic_name=st_name,
-                verified_facts=[],
-                verified_tables=[],
-                has_data=False,
-            ))
-            continue
+            log.warning(f"  Stage 6 [{extraction.sub_topic_id}]: no source text — marking unverified")
+            return VerifiedSubTopic(sub_topic_id=extraction.sub_topic_id, sub_topic_name=st_name,
+                                    verified_facts=[], verified_tables=[], has_data=False)
 
-        # Format extracted data for Gemini
         extracted_text = json.dumps(extracted_fields, ensure_ascii=False, indent=2)
-
         prompt = VERIFY_PROMPT.format(
             sub_topic_name=st_name,
             source_text=source_text.replace("{", "{{").replace("}", "}}"),
             extracted_data=extracted_text.replace("{", "{{").replace("}", "}}"),
         )
 
+        client = GeminiClient()  # each thread gets own client; key rotation is module-level+thread-safe
         try:
             result = client.generate_json(prompt, temperature=0.0, max_tokens=8192)
         except Exception as e:
             log.warning(f"  Stage 6 [{extraction.sub_topic_id}]: Gemini verify failed: {e}")
             result = {"verified_facts": [], "verified_tables": []}
 
-        # Parse verified facts — log conflicts even for verified items
         verified_facts = []
         conflicts_found = 0
         for item in result.get("verified_facts", []):
@@ -190,40 +172,35 @@ def run(
                     source_url=extraction.source_urls[0] if extraction.source_urls else "",
                     source_snippet=item.get("source_snippet", ""),
                 ))
-
         if conflicts_found:
             log.warning(f"  Stage 6 [{extraction.sub_topic_id}]: {conflicts_found} conflicting data points dropped")
 
-        # Parse verified tables — preserve context_note in title
         verified_tables = []
         for tbl in result.get("verified_tables", []):
             if tbl.get("verified"):
-                # Append context_note to table title so writer knows what the table covers
                 title = tbl.get("title", "")
                 ctx = tbl.get("context_note", "").strip()
                 if ctx and ctx.lower() not in title.lower():
                     title = f"{title} ({ctx})" if title else ctx
-                verified_tables.append({
-                    "title": title,
-                    "columns": tbl.get("columns", []),
-                    "rows": tbl.get("rows", []),
-                })
+                verified_tables.append({"title": title, "columns": tbl.get("columns", []), "rows": tbl.get("rows", [])})
 
         has_data = bool(verified_facts or verified_tables)
-        vst = VerifiedSubTopic(
-            sub_topic_id=extraction.sub_topic_id,
-            sub_topic_name=st_name,
-            verified_facts=verified_facts,
-            verified_tables=verified_tables,
-            has_data=has_data,
-        )
-        results.append(vst)
+        log.info(f"  Stage 6 [{extraction.sub_topic_id}]: {len(verified_facts)} facts, {len(verified_tables)} tables, has_data={has_data}")
+        return VerifiedSubTopic(sub_topic_id=extraction.sub_topic_id, sub_topic_name=st_name,
+                                verified_facts=verified_facts, verified_tables=verified_tables, has_data=has_data)
 
-        total_extracted = len(extracted_fields)
-        total_verified = len(verified_facts)
-        log.info(f"  Stage 6 [{extraction.sub_topic_id}]: "
-                 f"{total_verified}/{total_extracted} facts verified, "
-                 f"{len(verified_tables)} tables, has_data={has_data}")
+    # Run all verifications in parallel (max 3 workers = one per Gemini key)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {pool.submit(_verify_one, ext): ext.sub_topic_id for ext in extractions}
+        id_to_result = {}
+        for fut in concurrent.futures.as_completed(futures):
+            st_id = futures[fut]
+            try:
+                id_to_result[st_id] = fut.result()
+            except Exception as e:
+                log.error(f"  Stage 6 [{st_id}]: worker crashed: {e}")
+
+    results = [id_to_result[ext.sub_topic_id] for ext in extractions if ext.sub_topic_id in id_to_result]
 
     # Save checkpoint
     checkpoint.write_text(

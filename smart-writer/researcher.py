@@ -25,6 +25,7 @@ Outputs (saved to run_dir):
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import threading
 import json
@@ -139,7 +140,7 @@ class _YouClient:
     Uses the official youdotcom SDK.
     """
 
-    def __init__(self, max_concurrent: int = 4):
+    def __init__(self, max_concurrent: int = 17):
         raw = os.getenv("YOU_API_KEYS", "") or os.getenv("YOU_API_KEY", "")
         self._keys          = [k.strip() for k in raw.split(",") if k.strip()]
         self._idx           = 0
@@ -720,29 +721,36 @@ def run(blueprint: Blueprint, run_dir: Path) -> tuple[SourceList, dict[str, Fetc
     pages: dict[str, FetchedPage] = {}
     page_meta: dict[str, dict]    = {}
 
-    for i, url in enumerate(all_urls):
-        log.info("  [%d/%d] %s", i + 1, len(all_urls), url[:80])
-        result = _fetch_url(url, blueprint.primary_entity, pages_dir)
-        if result is None:
-            log.warning("  → fetch failed")
-            page_meta[url] = {"url": url, "entity_validated": False, "error": "fetch failed"}
-            continue
+    # ── Parallel URL fetch — ThreadPoolExecutor ────────────────────────────────
+    # BrightData has per-account concurrency limit; direct fetches are CPU/network
+    # bound. 8 workers balances speed vs. BrightData rate limits.
+    FETCH_WORKERS = 8
+    log.info("Researcher: fetching %d URLs with %d workers", len(all_urls), FETCH_WORKERS)
 
-        page, _md = result
-        page_meta[url] = {
-            "url":              url,
-            "title":            page.title,
-            "fetched_via":      page.fetched_via,
-            "entity_validated": page.entity_validated,
-            "text_len":         len(page.clean_text),
-        }
-        if page.entity_validated:
-            pages[url] = page
-            log.info("  → ✓ validated (%d chars, via %s)", len(page.clean_text), page.fetched_via)
-        else:
-            log.info("  → ✗ entity mismatch (kept snippets as fallback)")
+    def _fetch_one(url: str):
+        return url, _fetch_url(url, blueprint.primary_entity, pages_dir)
 
-        time.sleep(0.3)  # polite
+    with concurrent.futures.ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
+        fetch_futures = {pool.submit(_fetch_one, url): url for url in all_urls}
+        for i, future in enumerate(concurrent.futures.as_completed(fetch_futures), 1):
+            url, result = future.result()
+            if result is None:
+                log.warning("  [%d/%d] fetch failed: %s", i, len(all_urls), url[:70])
+                page_meta[url] = {"url": url, "entity_validated": False, "error": "fetch failed"}
+                continue
+            page, _md = result
+            page_meta[url] = {
+                "url":              url,
+                "title":            page.title,
+                "fetched_via":      page.fetched_via,
+                "entity_validated": page.entity_validated,
+                "text_len":         len(page.clean_text),
+            }
+            if page.entity_validated:
+                pages[url] = page
+                log.info("  [%d/%d] ✓ %s (%d chars, %s)", i, len(all_urls), url[:60], len(page.clean_text), page.fetched_via)
+            else:
+                log.info("  [%d/%d] ✗ entity mismatch: %s", i, len(all_urls), url[:60])
 
     # ── Step 5: Save checkpoints ───────────────────────────────────────────────
     source_list = SourceList(by_sub_topic=by_sub_topic, all_urls=all_urls)

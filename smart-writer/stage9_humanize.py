@@ -16,6 +16,8 @@ What this does:
 """
 
 from __future__ import annotations
+import concurrent.futures
+import threading as _threading
 
 import json
 import logging
@@ -103,70 +105,49 @@ def run(
         log.warning("Stage 9: sections directory not found — skipping humanization")
         return sections
 
-    client = QwenClient()
-    ai_phrases_str = ", ".join(f'"{p}"' for p in AI_PATTERNS[:12])  # keep prompt concise
+    ai_phrases_str = ", ".join(f'"{p}"' for p in AI_PATTERNS[:12])
+    _write_lock = _threading.Lock()
 
-    humanized: list[WrittenSection] = []
-
-    for i, section in enumerate(sections):
+    def _humanize_one(args) -> WrittenSection:
+        i, section = args
         if section.humanized:
-            log.info(f"  Stage 9 [{i+1}]: already humanized — skipping")
-            humanized.append(section)
-            continue
-
-        # Find the checkpoint file for this section
+            return section
         section_files = list(sections_dir.glob(f"{i:02d}_*.html"))
         if not section_files:
             log.warning(f"  Stage 9 [{i+1}]: section file not found — skipping")
-            humanized.append(section)
-            continue
-
+            section.humanized = True
+            return section
         section_file = section_files[0]
-
-        # Only bother humanizing if there's enough prose to matter
         prose_text = _extract_prose(section.html)
         if len(prose_text) < 100:
             log.info(f"  Stage 9 [{i+1}]: minimal prose — skipping: {section.heading[:50]}")
             section.humanized = True
-            humanized.append(section)
-            continue
-
+            return section
         log.info(f"  Stage 9 [{i+1}]: humanizing: {section.heading[:60]}")
-
-        prompt = HUMANIZE_PROMPT.format(
-            ai_phrases=ai_phrases_str,
-            html=section.html,
-        )
-
+        prompt = HUMANIZE_PROMPT.format(ai_phrases=ai_phrases_str, html=section.html)
+        client = QwenClient()  # each thread gets own client + own HF key rotation
         try:
-            new_html = client.generate(
-                system=HUMANIZE_SYSTEM,
-                user=prompt,
-                temperature=0.75,
-                max_tokens=3000,
-            )
+            new_html = client.generate(system=HUMANIZE_SYSTEM, user=prompt, temperature=0.75, max_tokens=3000)
         except Exception as e:
             log.warning(f"  Stage 9 [{i+1}]: humanization failed ({e}) — keeping original")
             section.humanized = True
-            humanized.append(section)
-            continue
-
-        # Sanity check: new HTML should still contain the heading
+            return section
         heading_text = re.sub(r"<[^>]+>", "", section.html.split("\n")[0])[:30]
         if heading_text and heading_text.lower() not in new_html.lower():
-            log.warning(f"  Stage 9 [{i+1}]: humanized output lost heading — keeping original")
+            log.warning(f"  Stage 9 [{i+1}]: lost heading — keeping original")
             section.humanized = True
-            humanized.append(section)
-            continue
-
-        # Overwrite the section file
-        section_file.write_text(new_html, encoding="utf-8")
-
+            return section
+        with _write_lock:
+            section_file.write_text(new_html, encoding="utf-8")
         section.html = new_html
         section.word_count = _word_count(new_html)
         section.humanized = True
         log.info(f"  Stage 9 [{i+1}]: done ({section.word_count} words)")
-        humanized.append(section)
+        return section
+
+    # Parallel humanization: 2 workers (2 HF tokens)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        humanized = list(pool.map(_humanize_one, enumerate(sections)))
 
     log.info(f"Stage 9: humanized {sum(1 for s in humanized if s.humanized)}/{len(sections)} sections")
 
