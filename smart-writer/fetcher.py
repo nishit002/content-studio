@@ -158,6 +158,25 @@ def _validate_entity(clean_text: str, primary_entity: str) -> bool:
         full_acronym = "".join(w[0] for w in words).lower()
         if full_acronym != acronym and full_acronym in text_lower:
             return True
+    # Try without the trailing location/campus word (e.g. "SRM... Kanchipuram" →
+    # "SRM Institute of Technology" — pages use canonical name without city qualifier)
+    if len(words) >= 3:
+        short_entity = " ".join(words[:-1]).lower()
+        if text_lower.count(short_entity) >= 2:
+            return True
+        # Also try compact of short entity
+        short_compact = short_entity.replace(" ", "")
+        if short_compact in text_lower:
+            return True
+    # Try compact of first 3 words (handles initial-separated names like "G L Bajaj",
+    # "C.V. Raman" where page may write "GL Bajaj", "CV Raman" without spaces/dots)
+    if len(words) >= 3:
+        first3_compact = "".join(w.replace(".", "") for w in words[:3]).lower()
+        if len(first3_compact) >= 4:
+            # Strip spaces and dots from page text for this check
+            text_compact = text_lower.replace(" ", "").replace(".", "")
+            if first3_compact in text_compact:
+                return True
     return False
 
 

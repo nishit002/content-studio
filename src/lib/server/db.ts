@@ -92,6 +92,22 @@ function migrate(db: Database.Database) {
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
 
+    -- Server-side job queue (tracks all long-running ops: single_article, aeo_scrape, sro, news_discover)
+    CREATE TABLE IF NOT EXISTS server_jobs (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      job_type TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'running',
+      progress_json TEXT NOT NULL DEFAULT '{}',
+      error TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at TEXT,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_server_jobs_session ON server_jobs(session_id, status);
+
     -- Writing rules presets
     CREATE TABLE IF NOT EXISTS writing_rules (
       session_id TEXT NOT NULL,

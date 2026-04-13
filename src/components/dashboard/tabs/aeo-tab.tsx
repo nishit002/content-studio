@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import type { AuditReport, AuditCheck, SROResult, LLMRecommendation } from "@/lib/server/sro-types";
 
 export interface AeoSuggestions {
@@ -304,46 +304,96 @@ function SroAnalysisPanel({ onGenerate }: { onGenerate: (s: AeoSuggestions) => v
   const [result, setResult] = useState<SROResult | null>(null);
   const [error, setError] = useState("");
 
+  // Ref to clear SRO poll on unmount
+  const sroJobPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Resume any running SRO job on mount
+  useEffect(() => {
+    fetch("/api/jobs?active=1")
+      .then((r) => r.json())
+      .then((data: { jobs?: Array<{ id: string; job_type: string; progress: { stage?: string; result?: SROResult } }> }) => {
+        const running = data.jobs?.find((j) => j.job_type === "sro");
+        if (!running) return;
+        setStage(running.progress?.stage ?? "grounding");
+        const jobId = running.id;
+        const poll = setInterval(async () => {
+          try {
+            const r = await fetch(`/api/jobs?id=${jobId}`);
+            if (!r.ok) return;
+            const job = await r.json() as { status: string; progress: { stage?: string; result?: SROResult; error?: string } };
+            setStage(job.progress?.stage ?? "grounding");
+            if (job.status === "done") {
+              if (job.progress?.result) setResult(job.progress.result);
+              clearInterval(poll);
+              if (sroJobPollRef.current === poll) sroJobPollRef.current = null;
+            } else if (job.status === "error") {
+              setError(job.progress?.error ?? "Analysis failed");
+              setStage("error");
+              clearInterval(poll);
+              if (sroJobPollRef.current === poll) sroJobPollRef.current = null;
+            }
+          } catch { /* ignore */ }
+        }, 3000);
+        sroJobPollRef.current = poll;
+      })
+      .catch(() => {});
+    return () => { if (sroJobPollRef.current) clearInterval(sroJobPollRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   async function runSro() {
     if (!url.trim() || !keyword.trim()) return;
     setStage("grounding");
     setError("");
     setResult(null);
 
+    // Submit — server runs in background, returns serverJobId immediately
+    let serverJobId: string | null = null;
     try {
       const res = await fetch("/api/sro", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: url.trim(), keyword: keyword.trim() }),
       });
-
-      if (!res.body) throw new Error("No response body");
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n\n");
-        buffer = lines.pop() ?? "";
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const event = JSON.parse(line.slice(6)) as { stage: string; data?: SROResult; error?: string };
-            setStage(event.stage);
-            if (event.stage === "done" && event.data) setResult(event.data);
-            if (event.stage === "error") setError(event.error ?? "Unknown error");
-          } catch { /* skip malformed */ }
-        }
+      if (!res.ok) {
+        const e = await res.json() as { error?: string };
+        throw new Error(e.error ?? `HTTP ${res.status}`);
       }
+      const data = await res.json() as { serverJobId: string };
+      serverJobId = data.serverJobId;
     } catch (e) {
       setStage("error");
       setError(e instanceof Error ? e.message : String(e));
+      return;
     }
+
+    // Clear any previous poll
+    if (sroJobPollRef.current) { clearInterval(sroJobPollRef.current); sroJobPollRef.current = null; }
+
+    // Poll every 3s for stage updates and final result
+    const jobId = serverJobId;
+    const poll = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/jobs?id=${jobId}`);
+        if (!r.ok) return;
+        const job = await r.json() as {
+          status: string;
+          progress: { stage?: string; result?: SROResult; error?: string };
+        };
+        setStage(job.progress?.stage ?? "grounding");
+        if (job.status === "done") {
+          if (job.progress?.result) setResult(job.progress.result);
+          clearInterval(poll);
+          if (sroJobPollRef.current === poll) sroJobPollRef.current = null;
+        } else if (job.status === "error") {
+          setError(job.progress?.error ?? "Analysis failed");
+          setStage("error");
+          clearInterval(poll);
+          if (sroJobPollRef.current === poll) sroJobPollRef.current = null;
+        }
+      } catch { /* ignore transient errors */ }
+    }, 3000);
+    sroJobPollRef.current = poll;
   }
 
   function handleGenerate() {
@@ -535,6 +585,37 @@ function PromptHubPanel() {
   const [prompts, setPrompts] = useState<AeoPrompt[]>([]);
   const [newPrompt, setNewPrompt] = useState("");
   const [scraping, setScraping] = useState(false);
+  const aeoJobPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Resume any running AEO scrape job on mount
+  useEffect(() => {
+    fetch("/api/jobs?active=1")
+      .then((r) => r.json())
+      .then((data: { jobs?: Array<{ id: string; job_type: string; progress: { done?: number; total?: number; log?: string[] } }> }) => {
+        const running = data.jobs?.find((j) => j.job_type === "aeo_scrape");
+        if (!running) return;
+        setScraping(true);
+        setProgress({ done: running.progress?.done ?? 0, total: running.progress?.total ?? 0, log: running.progress?.log ?? [] });
+        const jobId = running.id;
+        const poll = setInterval(async () => {
+          try {
+            const r = await fetch(`/api/jobs?id=${jobId}`);
+            if (!r.ok) return;
+            const job = await r.json() as { status: string; progress: { done?: number; total?: number; log?: string[] } };
+            setProgress({ done: job.progress.done ?? 0, total: job.progress.total ?? 0, log: job.progress.log ?? [] });
+            if (job.status === "done" || job.status === "error") {
+              clearInterval(poll);
+              setScraping(false);
+              if (aeoJobPollRef.current === poll) aeoJobPollRef.current = null;
+            }
+          } catch { /* ignore */ }
+        }, 3000);
+        aeoJobPollRef.current = poll;
+      })
+      .catch(() => {});
+    return () => { if (aeoJobPollRef.current) clearInterval(aeoJobPollRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [progress, setProgress] = useState<{ done: number; total: number; log: string[] }>({ done: 0, total: 0, log: [] });
   const [providers, setProviders] = useState<string[]>(["chatgpt", "perplexity", "gemini"]);
   const [brandConfigured, setBrandConfigured] = useState(true);
@@ -573,33 +654,44 @@ function PromptHubPanel() {
     if (!prompts.length || !providers.length) return;
     setScraping(true);
     setProgress({ done: 0, total: prompts.length * providers.length, log: [] });
-    const res = await fetch("/api/aeo/scrape", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ providers }),
-    });
-    if (!res.body) { setScraping(false); return; }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split("\n\n"); buf = lines.pop() ?? "";
-      for (const line of lines) {
-        if (!line.startsWith("data: ")) continue;
-        try {
-          const ev = JSON.parse(line.slice(6)) as { type: string; done?: number; total?: number; provider?: string; promptText?: string; run?: AeoRun; error?: string };
-          if (ev.type === "result" || ev.type === "error") {
-            const label = PROVIDER_LABELS[ev.provider ?? ""] ?? ev.provider ?? "";
-            const msg = ev.type === "error" ? `✗ ${label}: ${ev.error}` : `✓ ${label} — score ${ev.run?.visibilityScore ?? 0}`;
-            setProgress(p => ({ done: ev.done ?? p.done, total: ev.total ?? p.total, log: [...p.log.slice(-19), msg] }));
-          }
-        } catch { /* skip */ }
-      }
-    }
-    setScraping(false);
+
+    // Submit and get serverJobId immediately — runs in background on server
+    let serverJobId: string | null = null;
+    try {
+      const res = await fetch("/api/aeo/scrape", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providers }),
+      });
+      if (!res.ok) { setScraping(false); return; }
+      const data = await res.json() as { serverJobId: string; total: number };
+      serverJobId = data.serverJobId;
+      setProgress({ done: 0, total: data.total, log: [] });
+    } catch { setScraping(false); return; }
+
+    if (!serverJobId) { setScraping(false); return; }
+
+    // Poll every 3s for progress updates from server
+    const jobId = serverJobId;
+    const poll = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/jobs?id=${jobId}`);
+        if (!r.ok) return;
+        const job = await r.json() as {
+          status: string;
+          progress: { done?: number; total?: number; log?: string[] };
+        };
+        setProgress({
+          done: job.progress.done ?? 0,
+          total: job.progress.total ?? 0,
+          log: job.progress.log ?? [],
+        });
+        if (job.status === "done" || job.status === "error") {
+          clearInterval(poll);
+          setScraping(false);
+        }
+      } catch { /* ignore transient errors */ }
+    }, 3000);
   }
 
   async function openSuggest() {

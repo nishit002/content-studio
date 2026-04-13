@@ -40,6 +40,7 @@ You are an SEO content strategist. You must create a detailed article outline.
 Topic: {topic}
 Primary entity: {primary_entity}
 Article type: {article_type}
+Year: {year}  ← USE THIS EXACT YEAR in the H1 title (e.g. "Admission 2026", "Courses & Fees 2026")
 Content character: {content_character}
 
 VERIFIED DATA available (only use these sub-topics — no others):
@@ -62,7 +63,7 @@ BANNED title patterns — NEVER use any of these:
 
 REQUIRED: Use the primary_entity name EXACTLY as given above. Do not shorten, re-abbreviate, or expand it.
 
-REQUIRED title format per article type (replace ENTITY/YEAR/EXAM/FIELD/RANKING_NAME with actual values):
+REQUIRED title format per article type (replace ENTITY/YEAR with actual values — YEAR = the year given above):
   college_profile    → "ENTITY: Courses, Fees, Rankings & Placement YEAR"
                        OR "ENTITY Review YEAR: Admission, Fees & Campus Life"
   college_placement  → "ENTITY Placements YEAR: Average Package, Top Recruiters & Stats"
@@ -72,15 +73,22 @@ REQUIRED title format per article type (replace ENTITY/YEAR/EXAM/FIELD/RANKING_N
   ranking_list       → "RANKING_NAME YEAR: Top Colleges, Scores & Category-Wise List"
   career_guide       → "Career in FIELD: Salary, Job Roles & How to Get Started"
 
+CRITICAL YEAR RULE: The YEAR in the title MUST match the year given at the top of this prompt.
+  WRONG: "Pusa Institute of Technology: Courses, Fees & Admission 2024"  (blueprint says 2026)
+  CORRECT: "Pusa Institute of Technology: Courses, Fees & Admission 2026"
+
 If you have a strong verified stat (NIRF rank, avg package, founded year), include it:
-  GOOD: "VIT-AP Amaravathi: Courses, Fees, NIRF Rank & Placement 2025"
-  GOOD: "IIM Ahmedabad Placements 2024: ₹32.2 LPA Average, 100% Placement"
+  GOOD: "VIT-AP Amaravathi: Courses, Fees, NIRF Rank & Placement 2026"
+  GOOD: "IIM Ahmedabad Placements 2026: ₹32.2 LPA Average, 100% Placement"
 
 ═══ SECTION HEADING RULES ═══
 
 1. Only include sections where verified data EXISTS in the list above.
    If a sub-topic has has_data=false, DO NOT create a section for it.
-2. 5-8 sections total (not counting FAQ). Each section = 600-800 words target.
+2. 3-8 sections total (not counting FAQ). Only include sections where has_data=true.
+   Word target per section: 700-900 words for prose/mixed sections; 500-700 for table-heavy sections.
+   These are MINIMUM floors — set word_target accordingly. A 400-word section is incomplete.
+   Do NOT invent sub-sections. Do NOT pad with repetition — hit the floor through analytical depth.
 3. Section headings must be concise keyword/topic phrases (5–8 words). They are navigation labels, NOT sentences.
    Use the entity short form or abbreviation (e.g. RUHS, IIM-A, BHU) not the full name unless needed for clarity.
    A heading CAN include one key fact but must NOT be a full statement or claim.
@@ -90,7 +98,12 @@ If you have a strong verified stat (NIRF rank, avg package, founded year), inclu
    GOOD: "Eligibility Criteria for MBBS & Other Courses"
    GOOD: "NEET UG & RUHS Entrance Exam Requirements"
    GOOD: "How to Apply: Step-by-Step Guide"
-4. Each sub-topic id must appear in AT MOST ONE section's sub_topic_ids list.
+4. SECTION ORDERING — for college_profile articles, the FIRST section MUST be the institution overview:
+   use the "College Overview & Key Facts" sub-topic (id: college_overview) as section 1.
+   If college_overview has insufficient data, still place it first and use data from other sub-topics
+   to write a contextual introduction. The order must be: Overview → Courses → Fees → Placements → Rankings → Campus.
+   Other article types: follow the typical competitor section order from the character research.
+4b. Each sub-topic id must appear in AT MOST ONE section's sub_topic_ids list.
    NEVER assign the same sub-topic to two different sections — this creates duplicate content.
 5. Adapt to the content character:
    - data-heavy: open each section with a data table, then analytical prose
@@ -112,7 +125,7 @@ Return a JSON object:
       "section_type": "table | prose | mixed | faq",
       "sub_topic_ids": ["id1", "id2"],
       "word_target": 750,
-      "format_hint": "lead with table, then 2 paragraphs of analysis",
+      "format_hint": "lead with table, then 4-6 paragraphs of analytical prose — each paragraph: fact + context + student takeaway",
       "content_character_note": "what the character research implies for this section"
     }}
   ],
@@ -167,6 +180,7 @@ def run(
         topic=blueprint.topic,
         primary_entity=blueprint.primary_entity,
         article_type=blueprint.article_type,
+        year=blueprint.year or "2026",
         content_character=character.content_character,
         verified_summary=verified_summary,
         character_notes=character_notes,

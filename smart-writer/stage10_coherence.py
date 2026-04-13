@@ -259,7 +259,11 @@ def _assemble_draft(outline: ArticleOutline, sections: list[WrittenSection]) -> 
     # Don't add H1 here — it's added once in _build_final_html
     parts = []
     for section in sections:
-        parts.append(section.html)
+        heading_text = re.sub(r"<[^>]+>", "", section.heading)
+        anchor = re.sub(r"[^a-z0-9]+", "-", heading_text.lower()).strip("-")
+        # Add id anchor to the first heading tag in this section so TOC links work
+        html = re.sub(r"(<h[2-6])([^>]*>)", rf'\1 id="{anchor}"\2', section.html, count=1)
+        parts.append(html)
     return "\n\n".join(parts)
 
 
@@ -359,6 +363,7 @@ _ARTICLE_STYLE = """\
   .faq-section { margin-top: 2rem; }
   .faq-item { margin-bottom: 1.2rem; }
   .faq-question { font-size: 1rem; margin-bottom: 0.3rem; }
+  .cs-dateline { font-size: 0.8rem; color: #888; margin: 0.2rem 0 1.5rem; font-style: italic; }
   .sources { margin-top: 2rem; font-size: 0.85rem; color: #555; }
   .cs-highlights { display: flex; gap: 1rem; flex-wrap: wrap; margin: 1rem 0 0.5rem; }
   .cs-stat { background: #f0f7ff; border: 1px solid #c8e0f8; border-radius: 6px; padding: 0.6rem 1rem; min-width: 110px; text-align: center; }
@@ -506,6 +511,13 @@ def _build_final_html(
     draft_html = _sanitize_html(draft_html)
     # Inject key-stat callout box before the most data-rich table
     draft_html = _inject_key_callouts(draft_html, article_type)
+    # If the first section already has a pre-H2 intro (written by stage8 Rule 6), leave it.
+    # If not (article starts directly with <h2>), we do NOT inject anything here —
+    # stage8 now handles the intro paragraph as part of section writing.
+    # We still ensure there is a visible "last updated" dateline after H1.
+    import datetime
+    dateline = f'<p class="cs-dateline">Last updated: {datetime.date.today().strftime("%B %Y")}</p>'
+    
 
     # Plain text version of article for FAQ extraction
     article_plain = re.sub(r"<[^>]+>", " ", draft_html)
@@ -529,6 +541,7 @@ def _build_final_html(
 <body>
 <article>
 <h1>{outline.h1_title}</h1>
+{dateline}
 
 {draft_html}
 

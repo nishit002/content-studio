@@ -9,6 +9,10 @@ export const tabs = [
 
 export type TabKey = (typeof tabs)[number];
 
+export type GeneratorSubTab = "single" | "bulk" | "news";
+
+export type ConfigSubTab = "project" | "api_keys" | "writing_rules" | "presets" | "brand_aeo";
+
 /* ── Content Types (universal, any industry) ── */
 export type ContentType =
   | "blog_post"

@@ -22,7 +22,16 @@ export async function GET(req: NextRequest) {
   }
 
   const runs = listBulkRuns(sessionId);
-  return Response.json({ runs });
+  // Annotate each run with its position in the worker queue (oldest-first = position 0)
+  const activeRuns = [...runs]
+    .filter((r) => r.status === "queued_server" || r.status === "running_server")
+    .sort((a, b) => new Date(a.started_at).getTime() - new Date(b.started_at).getTime());
+  const runsWithPosition = runs.map((r) => ({
+    ...r,
+    queuePosition: activeRuns.findIndex((a) => a.id === r.id), // -1 = not in queue
+    queueTotal: activeRuns.length,
+  }));
+  return Response.json({ runs: runsWithPosition });
 }
 
 /**
@@ -72,11 +81,82 @@ export async function POST(req: NextRequest) {
   // JSON body → create a new bulk run record
   const ct = req.headers.get("content-type") || "";
   if (ct.includes("application/json")) {
-    const body = await req.json() as { action: string; name: string; total: number };
+    const body = await req.json() as Record<string, unknown>;
     if (body.action === "createRun") {
-      const runId = createBulkRun(sessionId, body.name || "Batch", body.total || 0);
+      const { name, total } = body as { action: string; name: string; total: number };
+      const runId = createBulkRun(sessionId, name || "Batch", total || 0);
       return Response.json({ runId });
     }
+
+    // Queue run for server-side background worker
+    if (body.action === "queueRun") {
+      const { runId, items } = body as { action: string; runId: string; items: unknown[] };
+      if (!runId) return Response.json({ error: "runId required" }, { status: 400 });
+      const run = getBulkRun(sessionId, runId);
+      if (!run) return Response.json({ error: "Not found" }, { status: 404 });
+      updateBulkRun(runId, { status: "queued_server", items, done: 0, failed: 0 });
+      return Response.json({ ok: true });
+    }
+
+    // Pause a running server-side bulk run (worker stops after current item)
+    if (body.action === "pauseRun") {
+      const { runId } = body as { action: string; runId: string };
+      if (!runId) return Response.json({ error: "runId required" }, { status: 400 });
+      const run = getBulkRun(sessionId, runId);
+      if (!run) return Response.json({ error: "Not found" }, { status: 404 });
+      updateBulkRun(runId, { status: "paused_server" });
+      return Response.json({ ok: true });
+    }
+
+    // Immediately stop a running bulk run — kills subprocess within seconds via signal file
+    if (body.action === "stopRun") {
+      const { runId } = body as { action: string; runId: string };
+      if (!runId) return Response.json({ error: "runId required" }, { status: 400 });
+      const run = getBulkRun(sessionId, runId);
+      if (!run) return Response.json({ error: "Not found" }, { status: 404 });
+      // 1. Set DB status so worker won't pick up next item
+      updateBulkRun(runId, { status: "paused_server" });
+      // 2. Write stop-signal file — worker kills current subprocess on next stdout line
+      const stopFilePath = `/tmp/bulk_stop_${runId}`;
+      try {
+        const { writeFileSync } = await import("fs");
+        writeFileSync(stopFilePath, String(Date.now()), { flag: "w" });
+      } catch (e) {
+        console.error("Failed to write stop file:", e);
+      }
+      return Response.json({ ok: true });
+    }
+
+    // Resume a paused server-side bulk run
+    if (body.action === "resumeRun") {
+      const { runId } = body as { action: string; runId: string };
+      if (!runId) return Response.json({ error: "runId required" }, { status: 400 });
+      const run = getBulkRun(sessionId, runId);
+      if (!run) return Response.json({ error: "Not found" }, { status: 404 });
+      updateBulkRun(runId, { status: "queued_server" });
+      return Response.json({ ok: true });
+    }
+
+    // Reset all error items back to waiting so the worker retries them
+    if (body.action === "retryErrors") {
+      const { runId } = body as { action: string; runId: string };
+      if (!runId) return Response.json({ error: "runId required" }, { status: 400 });
+      const run = getBulkRun(sessionId, runId);
+      if (!run) return Response.json({ error: "Not found" }, { status: 404 });
+      const items = JSON.parse(run.items_json || "[]") as Array<Record<string, unknown>>;
+      let resetCount = 0;
+      for (const item of items) {
+        if (item.stage === "error") {
+          item.stage = "waiting";
+          item.error = null;
+          resetCount++;
+        }
+      }
+      const newFailed = (run.failed ?? 0) - resetCount;
+      updateBulkRun(runId, { items, failed: newFailed < 0 ? 0 : newFailed });
+      return Response.json({ ok: true, reset: resetCount });
+    }
+
     return Response.json({ error: "Unknown action" }, { status: 400 });
   }
 

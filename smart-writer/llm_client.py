@@ -16,6 +16,7 @@ import logging
 import os
 import random
 import time
+import threading
 from typing import Optional
 
 import requests
@@ -24,13 +25,78 @@ from dotenv import load_dotenv
 load_dotenv()
 log = logging.getLogger("atlas.llm")
 
-GEMINI_KEY    = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL  = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 HF_URL        = os.getenv("HF_API_URL", "https://router.huggingface.co/v1/chat/completions")
 HF_MODEL      = os.getenv("HF_MODEL", "Qwen/Qwen3-235B-A22B")
 
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+
+def _load_gemini_keys() -> list[str]:
+    """Load all Gemini keys from GEMINI_API_KEY + GEMINI_API_KEYS env vars."""
+    keys: list[str] = []
+    primary = os.getenv("GEMINI_API_KEY", "").strip()
+    if primary:
+        keys.append(primary)
+    for k in os.getenv("GEMINI_API_KEYS", "").split(","):
+        k = k.strip()
+        if k and k not in keys:
+            keys.append(k)
+    return keys
+
+# Module-level rotating key state (shared across all GeminiClient instances in one process)
+_gemini_keys: list[str] = _load_gemini_keys()
+_gemini_index: int = 0
+_gemini_cooldowns: dict[str, float] = {}  # key -> epoch when cooldown expires
+_gemini_lock = threading.Lock()
+
+def _next_gemini_key() -> str:
+    """Round-robin key rotation, skipping keys in cooldown."""
+    global _gemini_index
+    with _gemini_lock:
+        n = len(_gemini_keys)
+        if n == 0:
+            raise EnvironmentError("No Gemini API keys configured (set GEMINI_API_KEY or GEMINI_API_KEYS)")
+        now = time.time()
+        for _ in range(n):
+            key = _gemini_keys[_gemini_index % n]
+            _gemini_index = (_gemini_index + 1) % n
+            if _gemini_cooldowns.get(key, 0) <= now:
+                return key
+        # All in cooldown — return the one with shortest wait
+        return min(_gemini_keys, key=lambda k: _gemini_cooldowns.get(k, 0))
+
+def _cooldown_key(key: str, seconds: float) -> None:
+    with _gemini_lock:
+        _gemini_cooldowns[key] = time.time() + seconds
+
+# Legacy alias so existing code referencing GEMINI_KEY still works
+GEMINI_KEY = _gemini_keys[0] if _gemini_keys else ""
+
+# ── Per-key request tracking ───────────────────────────────────────────────────
+_STATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "key_stats.json")
+_stats_lock = threading.Lock()
+
+def _record_request(key_suffix: str, provider: str, success: bool) -> None:
+    try:
+        with _stats_lock:
+            try:
+                with open(_STATS_FILE) as _f:
+                    _stats = json.load(_f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                _stats = {}
+            _e = _stats.setdefault(key_suffix, {"provider": provider, "requests": 0, "errors": 0, "last_used": ""})
+            _e["requests"] += 1
+            if not success:
+                _e["errors"] += 1
+            from datetime import datetime, timezone
+            _e["last_used"] = datetime.now(timezone.utc).isoformat()
+            os.makedirs(os.path.dirname(_STATS_FILE), exist_ok=True)
+            with open(_STATS_FILE, "w") as _f:
+                json.dump(_stats, _f)
+    except Exception:
+        pass
+
 
 
 # ─── Gemini ───────────────────────────────────────────────────────────────────
@@ -46,7 +112,7 @@ class GeminiClient:
 
     def __init__(self, model: Optional[str] = None):
         self.model = model or GEMINI_MODEL
-        if not GEMINI_KEY:
+        if not _gemini_keys:
             raise EnvironmentError("GEMINI_API_KEY not set in .env")
 
     def generate(
@@ -56,7 +122,6 @@ class GeminiClient:
         max_tokens: int = 8192,
         retries: int = 3,
     ) -> str:
-        url = f"{GEMINI_BASE}/{self.model}:generateContent?key={GEMINI_KEY}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
@@ -65,6 +130,8 @@ class GeminiClient:
             },
         }
         for attempt in range(retries):
+            active_key = _next_gemini_key()
+            url = f"{GEMINI_BASE}/{self.model}:generateContent?key={active_key}"
             try:
                 resp = requests.post(url, json=payload, timeout=120)
                 resp.raise_for_status()
@@ -77,17 +144,23 @@ class GeminiClient:
                 text_parts = [p["text"] for p in parts if not p.get("thought", False) and "text" in p]
                 if not text_parts:
                     raise ValueError("No text parts in Gemini response")
-                return "".join(text_parts).strip()
+                _text = "".join(text_parts).strip()
+                _record_request(active_key[-8:], "gemini", True)
+                return _text
             except requests.exceptions.HTTPError as e:
                 status = e.response.status_code if e.response else 0
                 if status == 429:
-                    wait = 2 ** attempt * 5
-                    log.warning(f"Gemini rate-limit, waiting {wait}s (attempt {attempt+1}/{retries})")
-                    time.sleep(wait)
+                    wait = min(2 ** attempt * 5, 60)
+                    log.warning(f"Gemini 429 on key …{active_key[-6:]}, cooldown {wait}s (attempt {attempt+1})")
+                    _cooldown_key(active_key, wait)
+                    _record_request(active_key[-8:], "gemini", False)
+                    if attempt < retries + len(_gemini_keys) - 1:
+                        continue
                 elif status >= 500:
-                    log.warning(f"Gemini server error {status}, retrying...")
+                    log.warning(f"Gemini {status} on key …{active_key[-6:]}, retrying...")
                     time.sleep(3)
                 else:
+                    _record_request(active_key[-8:], "gemini", False)
                     raise
             except Exception as e:
                 if attempt < retries - 1:
@@ -124,6 +197,14 @@ class GeminiClient:
             try:
                 return json.loads(cleaned)
             except json.JSONDecodeError as e:
+                # Try regex extraction before firing another API call
+                import re as _re2
+                _match = _re2.search(r'(\{[\s\S]*\}|\[[\s\S]*\])', cleaned)
+                if _match:
+                    try:
+                        return json.loads(_match.group(1))
+                    except json.JSONDecodeError:
+                        pass
                 last_err = e
                 log.warning(f"Gemini JSON parse failed (attempt {attempt+1}/{retries}): {e}")
                 log.debug(f"Raw response:\n{raw[:300]}")

@@ -25,26 +25,20 @@ export async function GET(req: NextRequest) {
     const db = getDb();
     const runId = req.nextUrl.searchParams.get("runId");
     let items: unknown[];
+    // Show all items, not just from one run — sorted newest-published first.
+    // runId filter still supported if explicitly passed.
     if (runId) {
       items = db.prepare(
         `SELECT id, title, url, source, tags, published, status, run_id, created_at
          FROM news_items WHERE session_id = ? AND run_id = ?
-         ORDER BY created_at DESC LIMIT 200`
+         ORDER BY published DESC, created_at DESC LIMIT 300`
       ).all(sessionId, runId);
     } else {
-      // Default: show items from the latest completed run only
-      const latestRun = db.prepare(
-        `SELECT id FROM news_runs WHERE session_id = ? ORDER BY started_at DESC LIMIT 1`
-      ).get(sessionId) as { id: string } | undefined;
-      if (latestRun) {
-        items = db.prepare(
-          `SELECT id, title, url, source, tags, published, status, run_id, created_at
-           FROM news_items WHERE session_id = ? AND run_id = ?
-           ORDER BY created_at DESC LIMIT 200`
-        ).all(sessionId, latestRun.id);
-      } else {
-        items = [];
-      }
+      items = db.prepare(
+        `SELECT id, title, url, source, tags, published, status, run_id, created_at
+         FROM news_items WHERE session_id = ?
+         ORDER BY published DESC, created_at DESC LIMIT 300`
+      ).all(sessionId);
     }
     return Response.json({ items });
   }
@@ -194,57 +188,69 @@ export async function POST(req: NextRequest) {
   }
 
   if (action === "discover") {
-    // Run news discovery and store results
+    // fire-and-forget — return runId immediately, browser polls news_runs for completion
     const db = getDb();
-
-    // Create run record
     const runId = uuidv4();
     db.prepare(
       `INSERT INTO news_runs (id, session_id, status, started_at)
        VALUES (?, ?, 'running', datetime('now'))`
     ).run(runId, sessionId);
 
-    try {
-      const items = await discoverNews(sessionId);
+    // Run discovery in background — does NOT block the HTTP response
+    (async () => {
+      try {
+        const items = await discoverNews(sessionId);
+        const upsertStmt = db.prepare(
+          `INSERT INTO news_items (id, session_id, title, url, source, tags, published, status, run_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'discovered', ?, datetime('now'))
+           ON CONFLICT(session_id, url) DO UPDATE SET
+             published = excluded.published`
+        );
+        let newCount = 0;
+        const tx = db.transaction(() => {
+          for (const item of items) {
+            const id = uuidv4();
+            const result = upsertStmt.run(
+              id, sessionId, item.title, item.url, item.source,
+              item.tags || "", item.published || "", runId
+            );
+            if (result.changes > 0) newCount++;
+          }
+        });
+        tx();
+        db.prepare(
+          `UPDATE news_runs SET status = 'done', items_found = ?, completed_at = datetime('now') WHERE id = ?`
+        ).run(newCount, runId);
+      } catch {
+        try {
+          db.prepare(
+            `UPDATE news_runs SET status = 'error', completed_at = datetime('now') WHERE id = ?`
+          ).run(runId);
+        } catch { /* ignore */ }
+      }
+    })();
 
-      // Store discovered items — upsert so re-discovered URLs update their run_id
-      const upsertStmt = db.prepare(
-        `INSERT INTO news_items (id, session_id, title, url, source, tags, published, status, run_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'discovered', ?, datetime('now'))
-         ON CONFLICT(session_id, url) DO UPDATE SET
-           run_id = excluded.run_id,
-           status = 'discovered',
-           created_at = datetime('now')`
-      );
-
-      let newCount = 0;
-      const tx = db.transaction(() => {
-        for (const item of items) {
-          const id = uuidv4();
-          const result = upsertStmt.run(id, sessionId, item.title, item.url, item.source, item.tags || "", item.published || "", runId);
-          if (result.changes > 0) newCount++;
-        }
-      });
-      tx();
-
-      // Update run
-      db.prepare(
-        `UPDATE news_runs SET status = 'done', items_found = ?, completed_at = datetime('now') WHERE id = ?`
-      ).run(newCount, runId);
-
-      return Response.json({ ok: true, runId, itemsFound: newCount, totalFetched: items.length });
-    } catch (err) {
-      db.prepare(
-        `UPDATE news_runs SET status = 'error', completed_at = datetime('now') WHERE id = ?`
-      ).run(runId);
-      return Response.json(
-        { error: err instanceof Error ? err.message : "Discovery failed" },
-        { status: 500 }
-      );
-    }
+    // Return runId immediately — browser polls GET /api/news?view=runs to check status
+    return Response.json({ ok: true, runId, discovering: true });
   }
 
-  return Response.json({ error: "Unknown action" }, { status: 400 });
+  if (action === 'mark-done') {
+    const { id } = body as { id: string };
+    if (!id) return Response.json({ error: 'id required' }, { status: 400 });
+    const db = getDb();
+    db.prepare('UPDATE news_items SET status = ? WHERE id = ? AND session_id = ?').run('used', id, sessionId);
+    return Response.json({ ok: true });
+  }
+
+  if (action === 'unmark-done') {
+    const { id } = body as { id: string };
+    if (!id) return Response.json({ error: 'id required' }, { status: 400 });
+    const db = getDb();
+    db.prepare('UPDATE news_items SET status = ? WHERE id = ? AND session_id = ?').run('discovered', id, sessionId);
+    return Response.json({ ok: true });
+  }
+
+  return Response.json({ error: 'Unknown action' }, { status: 400 });
 }
 
 /**

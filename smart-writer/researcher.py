@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 import json
 import logging
 import os
@@ -106,6 +107,30 @@ AUTHORITATIVE = (
 
 from models import Blueprint, FetchedPage, SourceList  # noqa: E402
 
+_STATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "key_stats.json")
+_stats_lock = threading.Lock()
+
+def _record_you_request(key: str, success: bool) -> None:
+    suffix = key[-8:] if len(key) >= 8 else key
+    try:
+        with _stats_lock:
+            try:
+                with open(_STATS_FILE) as _f:
+                    _stats = json.load(_f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                _stats = {}
+            from datetime import datetime, timezone
+            _e = _stats.setdefault(suffix, {"provider": "you_search", "requests": 0, "errors": 0, "last_used": ""})
+            _e["requests"] += 1
+            if not success:
+                _e["errors"] += 1
+            _e["last_used"] = datetime.now(timezone.utc).isoformat()
+            os.makedirs(os.path.dirname(_STATS_FILE), exist_ok=True)
+            with open(_STATS_FILE, "w") as _f:
+                json.dump(_stats, _f)
+    except Exception:
+        pass
+
 
 class _YouClient:
     """
@@ -133,7 +158,7 @@ class _YouClient:
         self._idx += 1
         return key
 
-    async def _search_one(self, query: str, sem: asyncio.Semaphore, count: int = 10) -> list[dict]:
+    async def _search_one(self, query: str, sem: asyncio.Semaphore, count: int = 20) -> list[dict]:
         """Single query with semaphore passed in from the running loop."""
         from youdotcom import You  # type: ignore
         async with sem:
@@ -150,9 +175,11 @@ class _YouClient:
                             "description": getattr(r, "description", "") or "",
                             "snippets":    list(getattr(r, "snippets", []) or []),
                         })
+                _record_you_request(key, True)
                 return results
             except Exception as e:
                 log.warning("You.com search failed for '%s': %s", query[:50], e)
+                _record_you_request(key, False)
                 return []
 
     async def batch_search(self, queries: list[str]) -> dict[str, list[dict]]:
@@ -206,6 +233,9 @@ def _build_queries(blueprint: Blueprint) -> dict[str, list[str]]:
             f"{topic} placement report filetype:pdf {year}",
             f"{topic} top recruiters sector wise {year}",
             f"{entity} official website placements",
+            # Broad queries — surface whatever ranks best for this topic (portals, news, PDFs)
+            f"{topic} {year} complete placement data",
+            f"{topic} highest package companies visited {year}",
         ]
     elif etype == "ranking":
         entity_queries += [
@@ -218,6 +248,7 @@ def _build_queries(blueprint: Blueprint) -> dict[str, list[str]]:
             f"{topic} fees eligibility admission {year}",
             f"{topic} courses placements NIRF rank {year}",
             f"{topic} prospectus brochure filetype:pdf {year}",
+            f"{topic} complete overview {year}",
         ]
     elif blueprint.article_type == "admission_guide":
         entity_queries += [
@@ -393,11 +424,16 @@ def _entity_valid(text: str, primary_entity: str) -> bool:
     tl_no_comma = tl.replace(",", " ").replace("  ", " ")
     if el in tl_no_comma:
         return True
+    # Try with & replaced by "and" (e.g. "Technology & Science" → "Technology and Science")
+    el_and = el.replace(" & ", " and ")
+    if el_and in tl or el_and in tl_no_comma:
+        return True
     if el.replace(" ", "") in tl:
         return True
     words = primary_entity.split()
     if len(words) >= 2:
-        acronym = "".join(w[0] for w in words).lower()
+        stop = {"&", "and", "of", "the"}
+        acronym = "".join(w[0] for w in words if w.lower() not in stop).lower()
         if len(acronym) >= 3 and acronym in tl:
             return True
     return False
@@ -579,23 +615,65 @@ def run(blueprint: Blueprint, run_dir: Path) -> tuple[SourceList, dict[str, Fetc
         st_snippets: list[dict] = []
         for q in queries_by_st.get(st.id, []):
             st_snippets.extend(search_results.get(q, []))
-        snippets_by_st[st.id] = _snippets_to_text(st_snippets[:20])
+        snippets_by_st[st.id] = _snippets_to_text(st_snippets[:40])
 
     # Also collect entity-level snippets
     entity_snippets: list[dict] = []
     for q in queries_by_st.get("_entity", []):
         entity_snippets.extend(search_results.get(q, []))
-    snippets_by_st["_entity"] = _snippets_to_text(entity_snippets[:30])
+    snippets_by_st["_entity"] = _snippets_to_text(entity_snippets[:50])
 
     (run_dir / "you_snippets.json").write_text(
         json.dumps(snippets_by_st, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
     # ── Step 3: Collect URLs per sub-topic ────────────────────────────────────
+    # ORDER MATTERS for the indexer: first URLs in the list get read first.
+    # We build a shared "base" from entity-level queries (these surface the best
+    # overview pages — portals, main placement PDFs) and add them to EVERY
+    # sub-topic BEFORE sub-topic-specific results.
     by_sub_topic: dict[str, list[str]] = {}
     seen_urls: set[str] = set()
 
-    # Always include pre-mapped official URLs for this entity
+    # ── 3a: Entity-level results → base for ALL sub-topics ──────────────────
+    # These come from broad queries like "{topic} placement stats average package 2026"
+    # and surface the best overview pages (Collegedunia, Careers360, main PDFs).
+    entity_results: list[dict] = []
+    for q in queries_by_st.get("_entity", []):
+        entity_results.extend(search_results.get(q, []))
+
+    # Sort entity results to put the most data-rich sources first:
+    # 1. Portals (Shiksha, Careers360, Collegedunia) — aggregated student-facing data
+    # 2. Placement/topic-specific PDFs — direct placement reports
+    # 3. Other official PDFs — may have relevant data
+    # 4. Other official pages
+    # 5. Rest
+    _PORTALS = ("shiksha.com", "careers360.com", "collegedunia.com", "collegedekho.com", "getmyuni.com")
+    _topic_kw = blueprint.article_type.replace("_", " ").split()[0]  # e.g. "college" → "placement"
+
+    def _entity_priority(r: dict) -> int:
+        url = r.get("url", "").lower()
+        if any(p in url for p in _PORTALS):
+            return 0  # portals first
+        if _is_pdf_url(url) and any(k in url for k in ("placement", "recruit", "package", "salary")):
+            return 1  # placement-specific PDFs
+        if _is_pdf_url(url):
+            return 2  # other PDFs
+        if _is_authoritative_url(url):
+            return 3  # other official pages
+        return 4      # everything else
+
+    entity_ordered = sorted(entity_results, key=_entity_priority)
+
+    entity_base_urls: list[str] = []
+    for r in entity_ordered:
+        url = r.get("url", "")
+        if url and url not in seen_urls and not _should_skip(url):
+            seen_urls.add(url)
+            entity_base_urls.append(url)
+    log.info("Researcher: %d entity-level base URLs (portals, key PDFs)", len(entity_base_urls))
+
+    # ── 3b: Pre-mapped official URLs for this entity ─────────────────────────
     official_urls = []
     for key, urls in OFFICIAL_SOURCES.items():
         if key in blueprint.primary_entity.lower() or key in blueprint.topic.lower():
@@ -606,39 +684,34 @@ def run(blueprint: Blueprint, run_dir: Path) -> tuple[SourceList, dict[str, Fetc
     if official_urls:
         log.info("Researcher: %d pre-mapped official URLs", len(official_urls))
 
+    # ── 3c: Per sub-topic: entity base first, then official, then specific ───
     for st in blueprint.sub_topics:
-        st_urls: list[str] = list(official_urls)  # every sub-topic gets official URLs
+        # Start with entity-level base URLs (portals + key PDFs for this topic)
+        st_urls: list[str] = list(entity_base_urls)
 
+        # Add official pre-mapped URLs
+        for u in official_urls:
+            if u not in st_urls:
+                st_urls.append(u)
+
+        # Add per-sub-topic query results (fills remaining slots)
         st_results: list[dict] = []
         for q in queries_by_st.get(st.id, []):
             st_results.extend(search_results.get(q, []))
 
-        # Sort: PDFs first, then authoritative domains, then rest
         pdfs  = [r for r in st_results if _is_pdf_url(r.get("url", ""))]
         auth  = [r for r in st_results if _is_authoritative_url(r.get("url", "")) and not _is_pdf_url(r.get("url", ""))]
         rest  = [r for r in st_results if not _is_authoritative_url(r.get("url", "")) and not _is_pdf_url(r.get("url", ""))]
         ordered = pdfs + auth + rest
 
+        url_limit = 14  # generous limit — quality filtered by entity validation + indexer
         for r in ordered:
             url = r.get("url", "")
-            if url and url not in seen_urls and not _should_skip(url) and len(st_urls) < 8:
+            if url and url not in seen_urls and not _should_skip(url) and len(st_urls) < url_limit:
                 st_urls.append(url)
                 seen_urls.add(url)
 
         by_sub_topic[st.id] = st_urls
-
-    # Also add entity-level query results to each sub-topic
-    entity_results: list[dict] = []
-    for q in queries_by_st.get("_entity", []):
-        entity_results.extend(search_results.get(q, []))
-    for r in entity_results:
-        url = r.get("url", "")
-        if url and url not in seen_urls and not _should_skip(url):
-            seen_urls.add(url)
-            for st_id in by_sub_topic:
-                if len(by_sub_topic[st_id]) < 8:
-                    by_sub_topic[st_id].append(url)
-                    break
 
     all_urls = list(seen_urls)
     log.info("Researcher: %d unique URLs to fetch", len(all_urls))

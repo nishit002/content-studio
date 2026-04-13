@@ -837,19 +837,28 @@ function parseRssItems(xml: string, sourceName: string, category: string): NewsD
     let title = titleMatch?.[1]?.trim() || "";
     title = title.replace(/<[^>]*>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
 
-    // Extract link
+    // Extract link — strip CDATA wrapper if present
     let url = "";
     const linkMatch = block.match(/<link[^>]*href="([^"]+)"/i) || block.match(/<link[^>]*>([\s\S]*?)<\/link>/i);
     if (linkMatch) url = linkMatch[1]?.trim() || "";
+    // Strip CDATA wrapper that some feeds (HT, TOI) embed in <link> tags
+    url = url.replace(/^<!\[CDATA\[\s*/, "").replace(/\s*\]\]>$/, "").trim();
     // For Google News, extract the actual URL from the redirect
     if (url.includes("news.google.com") && url.includes("&url=")) {
       const actualUrl = url.match(/[&?]url=([^&]+)/);
       if (actualUrl) url = decodeURIComponent(actualUrl[1]);
     }
 
-    // Extract published date
-    const pubMatch = block.match(/<(?:pubDate|published|updated)[^>]*>([\s\S]*?)<\/(?:pubDate|published|updated)>/i);
-    const published = pubMatch?.[1]?.trim() || "";
+    // Extract published date — strip CDATA, normalize to ISO string for consistent sorting
+    const pubMatch = block.match(/<(?:pubDate|published|updated)[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/(?:pubDate|published|updated)>/i);
+    const rawPublished = pubMatch?.[1]?.trim() || "";
+    let published = rawPublished;
+    if (rawPublished) {
+      try {
+        const d = new Date(rawPublished);
+        if (!isNaN(d.getTime())) published = d.toISOString();
+      } catch { /* keep raw string */ }
+    }
 
     // Extract description/summary
     const descMatch = block.match(/<(?:description|summary|content)[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/(?:description|summary|content)>/i);
@@ -877,11 +886,13 @@ function parseRssItems(xml: string, sourceName: string, category: string): NewsD
 function isRecentItem(published: string, maxAgeHours = 48): boolean {
   if (!published) return true; // no date = include (be lenient)
   try {
-    const date = new Date(published);
-    if (isNaN(date.getTime())) return true; // unparseable = include
+    // Strip CDATA wrapper if it somehow survived normalization
+    const clean = published.replace(/^<!\[CDATA\[/, "").replace(/\]\]>$/, "").trim();
+    const date = new Date(clean);
+    if (isNaN(date.getTime())) return false; // unparseable = exclude (don't include stale unknown-age items)
     return Date.now() - date.getTime() <= maxAgeHours * 3600 * 1000;
   } catch {
-    return true;
+    return false;
   }
 }
 

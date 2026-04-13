@@ -14,8 +14,25 @@ interface ApiKeyEntry {
   key_hash: string;
 }
 
-export function ConfigurationTab() {
-  const [section, setSection] = useState<ConfigSection>("project");
+interface KeyStatEntry {
+  provider: string;
+  label: string;
+  key_suffix: string;
+  status: string;
+  requests: number;
+  errors: number;
+  last_used: string;
+}
+
+export function ConfigurationTab({
+  activeSection = "project",
+  onSectionChange,
+}: {
+  activeSection?: ConfigSection;
+  onSectionChange?: (s: ConfigSection) => void;
+}) {
+  const section = activeSection;
+  const setSection = (s: ConfigSection) => onSectionChange?.(s);
   const [config, setConfig] = useState<Record<string, string>>({});
   const [apiKeys, setApiKeys] = useState<ApiKeyEntry[]>([]);
   const [rules, setRules] = useState<Record<string, unknown>>({});
@@ -440,6 +457,35 @@ function ApiKeysSection({ keys, onKeysChange }: { keys: ApiKeyEntry[]; onKeysCha
   // original key_value before edit (needed to tell the API which key to replace)
   const [editOriginalKey, setEditOriginalKey] = useState("");
   const [testing, setTesting] = useState<string | null>(null);
+  const [keyStats, setKeyStats] = useState<KeyStatEntry[]>([]);
+  const [testingAll, setTestingAll] = useState(false);
+  const [showHealth, setShowHealth] = useState(false);
+
+  const loadKeyStats = async () => {
+    try {
+      const res = await fetch("/api/keys/stats");
+      if (res.ok) setKeyStats(await res.json());
+    } catch { /* ignore */ }
+  };
+
+  const testAllKeys = async () => {
+    setTestingAll(true);
+    setShowHealth(true);
+    try {
+      await fetch("/api/health");
+      await reloadKeys();
+      await loadKeyStats();
+    } finally {
+      setTestingAll(false);
+    }
+  };
+
+  useEffect(() => {
+    loadKeyStats().then(() => {
+      // auto-show panel if stats already exist
+      setShowHealth(true);
+    });
+  }, []);
 
   const resetForm = () => {
     setFormFields({});
@@ -615,6 +661,133 @@ function ApiKeysSection({ keys, onKeysChange }: { keys: ApiKeyEntry[]; onKeysCha
       <div className="flex items-center gap-2 p-3 rounded-lg bg-th-warning-soft text-th-warning text-xs">
         <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
         API keys are stored server-side in your local database. They are never sent to the browser.
+      </div>
+
+      {/* Key Health Dashboard */}
+      <div className="cs-card overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-th-border">
+          <div>
+            <h4 className="text-sm font-semibold text-th-text">Key Health Dashboard</h4>
+            <p className="text-xs text-th-text-muted mt-0.5">Cross-reference request counts with your cloud provider billing panel</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={loadKeyStats}
+              className="cs-btn cs-btn-ghost text-xs py-1.5 px-3"
+              title="Refresh request counts"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
+            </button>
+            <button
+              onClick={testAllKeys}
+              disabled={testingAll}
+              className="cs-btn cs-btn-secondary text-xs py-1.5 px-4 flex items-center gap-2"
+            >
+              {testingAll ? (
+                <span className="w-3 h-3 rounded-full border border-th-accent border-t-transparent animate-spin" />
+              ) : (
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+              )}
+              {testingAll ? "Testing..." : "Test All"}
+            </button>
+          </div>
+        </div>
+
+        {/* Summary bar */}
+        {keyStats.length > 0 && (() => {
+          const totalReqs = keyStats.reduce((s, k) => s + k.requests, 0);
+          const totalErrs = keyStats.reduce((s, k) => s + k.errors, 0);
+          const okRate = totalReqs > 0 ? Math.round((1 - totalErrs / totalReqs) * 100) : 100;
+          return (
+            <div className="flex items-center gap-6 px-5 py-3 bg-th-bg-secondary border-b border-th-border text-xs">
+              <div className="flex items-center gap-1.5">
+                <span className="text-th-text-muted">Total requests</span>
+                <span className="font-semibold text-th-text">{totalReqs.toLocaleString()}</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-th-text-muted">Errors</span>
+                <span className={`font-semibold ${totalErrs > 0 ? "text-red-400" : "text-green-400"}`}>{totalErrs}</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-th-text-muted">Success rate</span>
+                <span className={`font-semibold ${okRate >= 95 ? "text-green-400" : okRate >= 80 ? "text-yellow-400" : "text-red-400"}`}>{okRate}%</span>
+              </div>
+              <div className="flex-1" />
+              <span className="text-th-text-muted italic">Compare with Gemini AI Studio / HF usage dashboard</span>
+            </div>
+          );
+        })()}
+
+        {/* Key rows */}
+        <div className="divide-y divide-th-border">
+          {keys.length === 0 && (
+            <p className="text-xs text-th-text-muted italic px-5 py-4">No keys configured yet.</p>
+          )}
+          {keys.map((k, idx) => {
+              const providerStats = keyStats.filter((s) => s.provider === k.provider);
+              const providerKeys = keys.filter((kk) => kk.provider === k.provider);
+              const posInProvider = providerKeys.indexOf(k);
+              const stat = providerStats[posInProvider] ?? keyStats.find((s) => s.provider === k.provider && s.label === k.label);
+              const suffix = stat ? stat.key_suffix : k.key_value.slice(-8);
+              const isOk = k.status === "connected";
+              const isErr = k.status === "error";
+              const successRate = stat && stat.requests > 0
+                ? Math.round((1 - stat.errors / stat.requests) * 100) : null;
+              return (
+                <div key={idx} className="flex items-center gap-4 px-5 py-3.5 hover:bg-th-bg-secondary/50 transition-colors text-xs">
+                  {/* Status indicator */}
+                  <div className="flex items-center gap-2 w-20 shrink-0">
+                    <div className={`w-2 h-2 rounded-full shrink-0 ${isOk ? "bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.6)]" : isErr ? "bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.6)]" : "bg-th-text-muted"}`} />
+                    <span className={`text-xs font-medium capitalize ${isOk ? "text-green-400" : isErr ? "text-red-400" : "text-th-text-muted"}`}>
+                      {k.status === "connected" ? "Live" : k.status === "error" ? "Error" : "Untested"}
+                    </span>
+                  </div>
+
+                  {/* Provider + key ID */}
+                  <div className="flex items-center gap-2 w-40 shrink-0">
+                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${isOk ? "bg-green-500/10 text-green-400" : isErr ? "bg-red-500/10 text-red-400" : "bg-th-card-alt text-th-text-muted"}`}>
+                      {k.provider}
+                    </span>
+                    <span className="font-mono text-th-text-secondary">…{suffix}</span>
+                  </div>
+
+                  {/* Label */}
+                  <span className="text-th-text-muted w-24 shrink-0 truncate">{k.label || "—"}</span>
+
+                  <div className="flex-1" />
+
+                  {/* Request count */}
+                  <div className="flex items-center gap-6 text-right">
+                    {stat ? (
+                      <>
+                        <div className="text-right w-20">
+                          <div className="font-semibold text-th-text text-sm">{stat.requests.toLocaleString()}</div>
+                          <div className="text-th-text-muted" style={{fontSize:"10px"}}>requests</div>
+                        </div>
+                        <div className="text-right w-16">
+                          <div className={`font-semibold text-sm ${stat.errors > 0 ? "text-red-400" : "text-green-400"}`}>{stat.errors}</div>
+                          <div className="text-th-text-muted" style={{fontSize:"10px"}}>errors</div>
+                        </div>
+                        {successRate !== null && (
+                          <div className="text-right w-16">
+                            <div className={`font-semibold text-sm ${successRate >= 95 ? "text-green-400" : successRate >= 80 ? "text-yellow-400" : "text-red-400"}`}>{successRate}%</div>
+                            <div className="text-th-text-muted" style={{fontSize:"10px"}}>success</div>
+                          </div>
+                        )}
+                        <div className="text-right w-24">
+                          <div className="text-th-text text-xs">{stat.last_used ? new Date(stat.last_used).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}) : "—"}</div>
+                          <div className="text-th-text-muted" style={{fontSize:"10px"}}>last used</div>
+                        </div>
+                      </>
+                    ) : (
+                      <span className="text-th-text-muted text-xs">No data yet — run an article to track</span>
+                    )}
+                  </div>
+                </div>
+              );
+          })}
+        </div>
       </div>
 
       {apiProviders.map((provider) => {

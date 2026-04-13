@@ -76,6 +76,12 @@ SANITY CHECKS — violating any of these means do NOT extract the value:
   NEVER recommend Spivak, Rudin, Apostol, Zill or other international university textbooks.
 - Dates: if a date is not confirmed for this year, prefix with "Expected:".
 
+YEAR FLEXIBILITY — universities publish placement data with a 6-12 month lag:
+- If the topic requests 2026 data but only 2024-25 or 2025 data is available, extract it.
+- Append the actual year to the value, e.g. "18.5 LPA (2024-25)" or "Top: TCS (Batch 2025)".
+- Do NOT return null just because the year does not match exactly — recent data is valid.
+- If 2026 data IS present, prefer it and do not append the year suffix.
+
 RETURN JSON:
 {{
   "extracted_facts": [
@@ -114,23 +120,28 @@ def _build_source_text(
     pages:        dict[str, FetchedPage],
     pages_dir:    Path,
     snippets_text: str,
-    max_chars:    int = 12000,
+    max_chars:    int = 30000,
 ) -> str:
     """
     Build the best possible source text for a sub-topic.
     Priority: markdown_text (tables preserved) > clean_text > You.com snippets.
+
+    Each page gets at most PER_PAGE_MAX chars so multiple sources can contribute.
+    This prevents one large page (e.g. a 74k-char Collegedunia page) from
+    consuming the entire budget and leaving no room for PDFs with exact stats.
     """
+    PER_PAGE_MAX = 8000  # max chars to take from any single page
     parts: list[str] = []
-    budget = max_chars
+    total_used = 0
 
     for url in st_urls:
-        if budget <= 0:
+        if total_used >= max_chars:
             break
         page = pages.get(url)
         if not page:
             continue
 
-        # Try markdown first (preserves tables)
+        # Try markdown first (preserves tables as | col | col | rows)
         url_hash = __import__("hashlib").md5(url.encode()).hexdigest()[:12]
         md_file  = pages_dir / f"{url_hash}_md.txt"
 
@@ -143,13 +154,16 @@ def _build_source_text(
         else:
             continue
 
-        chunk = text[:budget]
+        remaining_budget = max_chars - total_used
+        chunk_size = min(PER_PAGE_MAX, remaining_budget)
+        chunk = text[:chunk_size]
         parts.append(f"=== Source: {page.title or url[:60]} ({source_type}) ===\n{chunk}")
-        budget -= len(chunk)
+        total_used += len(chunk)
 
     # Fallback: You.com snippets (always useful even if no validated pages)
-    if snippets_text and budget > 500:
-        parts.append(f"=== You.com Research Snippets ===\n{snippets_text[:budget]}")
+    remaining = max_chars - total_used
+    if snippets_text and remaining > 500:
+        parts.append(f"=== You.com Research Snippets ===\n{snippets_text[:remaining]}")
 
     if not parts:
         return ""
@@ -304,7 +318,7 @@ def run(
         combined_snip = f"{st_snippets}\n\n{entity_snippets}" if st_snippets else entity_snippets
 
         source_text = _build_source_text(
-            st_urls, pages, pages_dir, combined_snip, max_chars=12000
+            st_urls, pages, pages_dir, combined_snip, max_chars=30000
         )
 
         if not source_text.strip():

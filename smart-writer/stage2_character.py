@@ -6,14 +6,21 @@ Output: ArticleCharacter dataclass + character.json checkpoint
 
 What happens:
   1. DDG search: find 3-5 top-ranking articles on the same topic
-  2. BrightData/direct: fetch their HTML
-  3. Gemini analyses: section order, data depth, content character
+  2. Priority: Collegedunia, Shiksha, Careers360 pages fetched first
+     (these mirror what Indian students see and expect)
+  3. BrightData/direct: fetch their HTML
+  4. Gemini analyses: section order, data depth, content character
      (data-heavy / narrative / comparison / timeline / faq-first)
 
 Why this matters:
   An IIM placement article is structured differently from a syllabus article.
   Character research ensures our article mirrors what already ranks — we don't
   impose a generic template on every topic.
+
+  Education portals (Collegedunia, Shiksha, Careers360) are prioritised because:
+  - They define the structural pattern Indian students expect
+  - They have the best data organisation for Indian education topics
+  - Our article should match their structure but with better/more complete data
 """
 
 from __future__ import annotations
@@ -47,7 +54,7 @@ Analyse these articles and return a JSON object:
   "section_order": ["list of section headings in the typical order they appear"],
   "content_character": one of ["data-heavy", "narrative", "comparison", "timeline", "faq-first"],
   "avg_section_count": number,
-  "notes": "any standout patterns: do they lead with a data table? use year-vs-year columns? have a salary breakdown by function?"
+  "notes": "any standout patterns: do they lead with a data table? use year-vs-year columns? have a salary breakdown by function? what data tables are most prominent?"
 }}
 
 Rules for content_character:
@@ -57,7 +64,13 @@ Rules for content_character:
 - "timeline": organised by year or chronological progression
 - "faq-first": article opens with a FAQ block before detailed content
 
-Focus on structure patterns that would make a NEW article on the same topic rank well.
+Focus on:
+1. What sections do the top-ranking articles include?
+2. What data tables do they use? (e.g. "placement stats by year", "top recruiters table", "salary range table")
+3. What is the section ORDER they follow?
+4. What data points are readers clearly searching for (based on what all articles cover)?
+
+Our article should follow the SAME structure but with more complete and accurate data.
 """
 
 
@@ -116,13 +129,14 @@ def run(blueprint: Blueprint, run_dir: Path) -> ArticleCharacter:
 
     log.info(f"Stage 2: researching article character for '{blueprint.topic}'")
 
-    # Build search query
+    # ── Broad DDG search — let the search engine surface the best pages ───────
+    # No domain filtering here. Whatever ranks for this topic IS the reference.
     query = blueprint.topic
     if blueprint.year:
         query = f"{blueprint.topic} {blueprint.year}"
 
-    urls = _ddg_search(query, max_results=8)
-    urls = [u for u in urls if _is_competitor_url(u)][:5]
+    urls = _ddg_search(query, max_results=10)
+    urls = [u for u in urls if _is_competitor_url(u)][:6]
 
     if not urls:
         log.warning("Stage 2: no competitor URLs found — using default character")
@@ -130,9 +144,8 @@ def run(blueprint: Blueprint, run_dir: Path) -> ArticleCharacter:
         _save(checkpoint, character, [])
         return character
 
-    log.info(f"Stage 2: fetching {len(urls)} competitor articles")
+    log.info(f"Stage 2: fetching {len(urls)} reference articles")
 
-    # Fetch competitor articles (no entity validation here — these ARE competitors)
     fetcher = PageFetcher(primary_entity="")
     pages = fetcher.fetch_many(urls, delay=1.5)
     valid_pages = [p for p in pages if not p.error and len(p.clean_text) > 500]
@@ -143,10 +156,10 @@ def run(blueprint: Blueprint, run_dir: Path) -> ArticleCharacter:
         _save(checkpoint, character, urls)
         return character
 
-    # Build excerpts for Gemini (first 800 chars of clean_text per page)
+    # Build excerpts — 1000 chars per page to capture section structure
     excerpts = []
-    for i, page in enumerate(valid_pages[:4]):
-        excerpt = page.clean_text[:800].replace("\n", " ")
+    for i, page in enumerate(valid_pages[:5]):
+        excerpt = page.clean_text[:1000].replace("\n", " ")
         excerpts.append(f"--- Article {i+1}: {page.title} ({page.url}) ---\n{excerpt}")
 
     excerpts_text = "\n\n".join(excerpts).replace("{", "{{").replace("}", "}}")
@@ -174,6 +187,7 @@ def run(blueprint: Blueprint, run_dir: Path) -> ArticleCharacter:
     )
     _save(checkpoint, character, urls)
     log.info(f"Stage 2: character = '{character.content_character}', {character.avg_section_count} sections")
+    log.info(f"Stage 2: section order = {character.section_order}")
     return character
 
 

@@ -65,6 +65,20 @@ interface ArticleData {
   outline: Record<string, unknown> | null;
 }
 
+interface HistoryJob {
+  id: string;
+  status: "running" | "queued" | "done" | "error";
+  error: string;
+  topic: string;
+  wordCount: number;
+  qualityGrade: string;
+  qualityScore: number;
+  articlePath: string;
+  startedAt: string;
+  createdAt: string;
+  elapsedMs: number;
+}
+
 interface ArticleListItem {
   slug: string;
   topic: string;
@@ -85,6 +99,18 @@ type ResultTab = "preview" | "quality" | "sections" | "outline";
 
 type GenerateMode = "single" | "bulk" | "news";
 
+interface SingleQueueItem {
+  id: number;
+  topic: string;
+  subKeywords: string;
+  region: string;
+  articleType: string;
+  customOutline: string;
+  status: "waiting" | "running" | "done" | "error";
+  error?: string;
+  slug?: string;
+}
+
 interface BulkRow {
   id: number;
   topic: string;
@@ -94,7 +120,8 @@ interface BulkRow {
 }
 
 interface BulkItem extends BulkRow {
-  stage: Stage | "waiting";
+  stage: Stage | "waiting" | "running";
+  currentPhase?: string;   // set by worker: "Outlining", "Researching", "Writing", etc.
   startedAt: number | null;
   finishedAt: number | null;
   elapsed: number;
@@ -133,19 +160,28 @@ interface PastRun {
   total_words: number;
   started_at: string;
   completed_at: string | null;
+  queuePosition: number;   // -1=not queued, 0=actively running, 1+=waiting behind others
+  queueTotal: number;
 }
 
 export function ContentGeneratorTab({
   aeoSuggestions,
   onAeoSuggestionsConsumed,
   onArticleGenerated,
+  subMode = "single",
+  onSubModeChange,
+  onViewInLibrary,
 }: {
   aeoSuggestions?: AeoSuggestions | null;
   onAeoSuggestionsConsumed?: () => void;
   onArticleGenerated?: () => void;
+  subMode?: GenerateMode;
+  onSubModeChange?: (mode: GenerateMode) => void;
+  onViewInLibrary?: (slug: string) => void;
 }) {
-  const [mode, setMode] = useState<GenerateMode>("single");
-  const [pipeline, setPipeline] = useState<"cg" | "atlas">("cg");
+  const mode = subMode;
+  const setMode = (m: GenerateMode) => onSubModeChange?.(m);
+  const [pipeline, setPipeline] = useState<"cg" | "atlas">("atlas");
   const [topic, setTopic] = useState("");
   const [subKeywords, setSubKeywords] = useState("");
   const [singleKwLoading, setSingleKwLoading] = useState(false);
@@ -159,6 +195,13 @@ export function ContentGeneratorTab({
   const [events, setEvents] = useState<ProgressEvent[]>([]);
   const [error, setError] = useState("");
   const [atlasRunId, setAtlasRunId] = useState("");   // set when ATLAS emits its run ID
+  const [generationStartTime, setGenerationStartTime] = useState<number | null>(null);
+  const [recentSingleJobs, setRecentSingleJobs] = useState<HistoryJob[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [currentGeneratingTopic, setCurrentGeneratingTopic] = useState<string>("");
+  const [singleQueue, setSingleQueue] = useState<SingleQueueItem[]>([]);
+  const singleQueueIdRef = useRef(0);
+  const singleQueueRef = useRef<SingleQueueItem[]>([]);
   const [result, setResult] = useState<Record<string, unknown> | null>(null);
   const [article, setArticle] = useState<ArticleData | null>(null);
   const [articleLoading, setArticleLoading] = useState(false);
@@ -171,11 +214,13 @@ export function ContentGeneratorTab({
   const [typeFilter, setTypeFilter] = useState("");
   const [visibleCount, setVisibleCount] = useState(20);
   const abortRef = useRef<AbortController | null>(null);
+  const singleJobPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── Bulk mode state ──
   const [bulkRows, setBulkRows] = useState<BulkRow[]>([]);
   const [bulkItems, setBulkItems] = useState<BulkItem[]>([]);
   const [bulkRunning, setBulkRunning] = useState(false);
+  const [bulkStopping, setBulkStopping] = useState(false);
   const [bulkCurrentIndex, setBulkCurrentIndex] = useState(-1);
   const [bulkUploading, setBulkUploading] = useState(false);
   const [bulkGeneratingKw, setBulkGeneratingKw] = useState<number | "all" | null>(null);
@@ -188,7 +233,76 @@ export function ContentGeneratorTab({
   const [expandedRunLoading, setExpandedRunLoading] = useState(false);
   const bulkAbortRef = useRef<AbortController | null>(null);
   const bulkTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const bulkPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastPollAtRef = useRef<number>(Date.now());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // On mount: check for any running single_article jobs and resume polling
+  useEffect(() => {
+    fetch("/api/jobs?active=1")
+      .then((r) => r.json())
+      .then((data: { jobs?: Array<{ id: string; job_type: string; progress: { stage?: string; contentId?: string } }> }) => {
+        const running = data.jobs?.find((j) => j.job_type === "single_article");
+        if (!running) return;
+        // Resume showing this job as in-progress
+        const serverJobId = running.id;
+        const stage = (running.progress?.stage ?? "queued") as Stage;
+        setGenerating(true);
+        setCurrentStage(stage);
+        if ((running.progress as {topic?: string}).topic) {
+          setCurrentGeneratingTopic((running.progress as {topic?: string}).topic as string);
+        }
+        if ((running.progress as {startedAt?: string}).startedAt) {
+          setGenerationStartTime(new Date((running.progress as {startedAt?: string}).startedAt as string).getTime());
+        } else {
+          setGenerationStartTime(Date.now());
+        }
+
+        const poll = async () => {
+          try {
+            const r = await fetch(`/api/jobs?id=${serverJobId}`);
+            if (!r.ok) return;
+            const job = await r.json() as { status: string; progress: { stage?: string; message?: string; detail?: Record<string, unknown>; log?: Array<{ stage: string; message: string; time: string }> } };
+            const s = (job.progress?.stage ?? "queued") as Stage;
+            setCurrentStage(s);
+            const rLog = job.progress?.log ?? [];
+            if (rLog.length > 0) {
+              setEvents(rLog.map(e => ({ stage: e.stage as Stage, message: e.message, timestamp: new Date(e.time).getTime() })));
+            }
+            if (job.status === "done") {
+              const detail = job.progress?.detail ?? {};
+              setResult(detail as Record<string, unknown>);
+              onArticleGenerated?.();
+              loadArticles();
+              if (singleJobPollRef.current) { clearInterval(singleJobPollRef.current); singleJobPollRef.current = null; }
+              setGenerating(false);
+            } else if (job.status === "error") {
+              setError(job.progress?.message ?? "Generation failed");
+              setCurrentStage("error");
+              if (singleJobPollRef.current) { clearInterval(singleJobPollRef.current); singleJobPollRef.current = null; }
+              setGenerating(false);
+            }
+          } catch { /* ignore */ }
+        };
+
+        poll();
+        singleJobPollRef.current = setInterval(poll, 3000);
+      })
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Load single article job history
+  const loadSingleHistory = useCallback(() => {
+    setHistoryLoading(true);
+    fetch("/api/generate/history?limit=25")
+      .then((r) => r.json())
+      .then((data: HistoryJob[]) => setRecentSingleJobs(data))
+      .catch(() => {})
+      .finally(() => setHistoryLoading(false));
+  }, []);
+
+  useEffect(() => { loadSingleHistory(); }, [loadSingleHistory]);
 
   // Load recent articles on mount and after generation completes
   const loadArticles = useCallback(() => {
@@ -251,93 +365,170 @@ export function ContentGeneratorTab({
       .finally(() => setArticleLoading(false));
   }, []);
 
-  const startGeneration = useCallback(async () => {
-    if (!topic.trim() || generating) return;
-
+  const startGenerationWithParams = useCallback(async (params: {
+    topic: string; subKeywords: string; region: string; articleType: string; customOutline: string; queueItemId?: number;
+  }) => {
+    if (generating) return;
     setGenerating(true);
     setCurrentStage("queued");
     setEvents([]);
     setError("");
     setAtlasRunId("");
     setResult(null);
-
-    const controller = new AbortController();
-    abortRef.current = controller;
+    setGenerationStartTime(Date.now());
+    setCurrentGeneratingTopic(params.topic);
+    if (params.queueItemId != null) {
+      setSingleQueue(prev => { const u = prev.map(q => q.id === params.queueItemId ? {...q, status: "running" as const} : q); singleQueueRef.current = u; return u; });
+    }
 
     try {
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic: topic.trim(), subKeywords, region, articleType: articleType || undefined, customOutline: customOutline.trim() || undefined, pipeline }),
-        signal: controller.signal,
+        body: JSON.stringify({
+          topic: params.topic.trim(),
+          subKeywords: params.subKeywords,
+          region: params.region,
+          articleType: params.articleType || undefined,
+          customOutline: params.customOutline.trim() || undefined,
+          pipeline,
+        }),
       });
 
       if (!res.ok) {
         let errMsg = `HTTP ${res.status}`;
-        try { errMsg = (await res.json()).error || errMsg; } catch { errMsg = await res.text().catch(() => errMsg); }
+        try { errMsg = (await res.json()).error || errMsg; } catch { /* ignore */ }
         throw new Error(errMsg);
       }
 
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error("No response stream");
+      const { serverJobId, contentId } = await res.json() as {
+        serverJobId: string;
+        contentId: string;
+        jobId: string;
+      };
 
-      const decoder = new TextDecoder();
-      let buffer = "";
+      // Poll server_jobs every 3s for stage updates
+      const poll = async () => {
+        try {
+          const r = await fetch(`/api/jobs?id=${serverJobId}`);
+          if (!r.ok) return;
+          const job = await r.json() as {
+            status: string;
+            progress: { stage?: string; message?: string; detail?: Record<string, unknown>; log?: Array<{ stage: string; message: string; time: string }> };
+          };
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const event: ProgressEvent = JSON.parse(line.slice(6));
-            setEvents((prev) => [...prev, event]);
-            setCurrentStage(event.stage);
-
-            // Capture ATLAS run ID as soon as it's emitted (for resume on failure)
-            if (event.detail?.atlasRunId) {
-              setAtlasRunId(event.detail.atlasRunId as string);
-            }
-
-            if (event.stage === "done" && event.detail) {
-              setResult((prev) => ({ ...(prev ?? {}), ...event.detail }));
-              onArticleGenerated?.();
-              loadAtlasRuns();
-              // For ATLAS: load article when slug is emitted
-              const atlasSlug = event.detail?.atlasSlug as string | undefined;
-              if (atlasSlug) {
-                loadArticles();
-                viewArticle(atlasSlug);
-              }
-            }
-            if (event.stage === "error") {
-              setError(event.message);
-            }
-          } catch {
-            // skip malformed lines
+          const stage = (job.progress?.stage ?? "queued") as Stage;
+          setCurrentStage(stage);
+          // Sync full server-side log so every pipeline event shows (not just stage changes)
+          const serverLog = (job.progress?.log as Array<{ stage: string; message: string; time: string }> | undefined) ?? [];
+          if (serverLog.length > 0) {
+            setEvents(serverLog.map(e => ({
+              stage: e.stage as Stage,
+              message: e.message,
+              timestamp: new Date(e.time).getTime(),
+            })));
           }
-        }
-      }
-    } catch (err) {
-      if ((err as Error).name === "AbortError") {
+
+          if (job.status === "done") {
+            // Article done — read detail from progress or re-fetch content
+            const detail = job.progress?.detail ?? {};
+            setResult(detail as Record<string, unknown>);
+            onArticleGenerated?.();
+            loadArticles();
+            loadSingleHistory();
+            loadAtlasRuns();
+            // ATLAS: navigate to article if slug present
+            const atlasSlug = detail.atlasSlug as string | undefined;
+            if (atlasSlug) viewArticle(atlasSlug);
+            // Stop polling
+            if (singleJobPollRef.current) { clearInterval(singleJobPollRef.current); singleJobPollRef.current = null; }
+            // Mark queue item done
+            if (params.queueItemId != null) {
+              setSingleQueue(prev => { const u = prev.map(q => q.id === params.queueItemId ? {...q, status: "done" as const, slug: atlasSlug} : q); singleQueueRef.current = u; return u; });
+            }
+            setGenerating(false);
+            setCurrentGeneratingTopic("");
+            setGenerationStartTime(null);
+            abortRef.current = null;
+            // Auto-process next item in queue
+            const nextItem = singleQueueRef.current.find(q => q.status === "waiting");
+            if (nextItem) {
+              setTimeout(() => startGenerationWithParams({
+                topic: nextItem.topic, subKeywords: nextItem.subKeywords,
+                region: nextItem.region, articleType: nextItem.articleType,
+                customOutline: nextItem.customOutline, queueItemId: nextItem.id,
+              }), 500);
+            }
+          } else if (job.status === "error") {
+            setError(job.progress?.message ?? "Generation failed");
+            setCurrentStage("error");
+            if (singleJobPollRef.current) { clearInterval(singleJobPollRef.current); singleJobPollRef.current = null; }
+            if (params.queueItemId != null) {
+              setSingleQueue(prev => { const u = prev.map(q => q.id === params.queueItemId ? {...q, status: "error" as const, error: job.progress?.message} : q); singleQueueRef.current = u; return u; });
+            }
+            setGenerating(false);
+            setCurrentGeneratingTopic("");
+            setGenerationStartTime(null);
+            abortRef.current = null;
+          }
+        } catch { /* ignore transient poll errors */ }
+      };
+
+      // Store serverJobId so cancel can clear polling
+      abortRef.current = { abort: () => {
+        if (singleJobPollRef.current) { clearInterval(singleJobPollRef.current); singleJobPollRef.current = null; }
+        setGenerating(false);
+        setCurrentStage("error");
         setError("Generation cancelled");
-      } else {
-        setError((err as Error).message);
-      }
+        abortRef.current = null;
+      } } as unknown as AbortController;
+
+      poll();
+      singleJobPollRef.current = setInterval(poll, 3000);
+    } catch (err) {
+      setError((err as Error).message);
       setCurrentStage("error");
-    } finally {
       setGenerating(false);
       abortRef.current = null;
     }
-  }, [topic, subKeywords, region, articleType, customOutline, generating]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [generating, pipeline, onArticleGenerated, loadArticles, loadSingleHistory, loadAtlasRuns, viewArticle]);
+
+  const startGeneration = useCallback(() => {
+    if (!topic.trim() || generating) return;
+    startGenerationWithParams({
+      topic: topic.trim(), subKeywords, region, articleType, customOutline,
+    });
+  }, [topic, subKeywords, region, articleType, customOutline, generating, startGenerationWithParams]);
+
+  const addToQueue = useCallback(() => {
+    if (!topic.trim()) return;
+    const id = ++singleQueueIdRef.current;
+    const item: SingleQueueItem = {
+      id, topic: topic.trim(), subKeywords, region, articleType, customOutline, status: "waiting",
+    };
+    setSingleQueue(prev => { const u = [...prev, item]; singleQueueRef.current = u; return u; });
+    setTopic(""); setSubKeywords(""); setArticleType(""); setCustomOutline(""); setShowCustomOutline(false);
+  }, [topic, subKeywords, region, articleType, customOutline]);
+
+  const processQueueNow = useCallback(() => {
+    const next = singleQueueRef.current.find(q => q.status === "waiting");
+    if (!next || generating) return;
+    startGenerationWithParams({
+      topic: next.topic, subKeywords: next.subKeywords, region: next.region,
+      articleType: next.articleType, customOutline: next.customOutline, queueItemId: next.id,
+    });
+  }, [generating, startGenerationWithParams]);
 
   const cancelGeneration = useCallback(() => {
-    abortRef.current?.abort();
+    if (singleJobPollRef.current) { clearInterval(singleJobPollRef.current); singleJobPollRef.current = null; }
+    if (abortRef.current && typeof (abortRef.current as unknown as { abort: () => void }).abort === 'function') {
+      (abortRef.current as unknown as { abort: () => void }).abort();
+    }
+    setGenerating(false);
+    setCurrentStage("error");
+    setError("Generation cancelled");
+    abortRef.current = null;
   }, []);
 
   // ── File upload handler ──
@@ -427,12 +618,11 @@ export function ContentGeneratorTab({
     const validRows = (rowsOverride ?? bulkRows).filter((r) => r.topic.trim());
     if (validRows.length === 0 || bulkRunning) return;
 
-    // Auto-name if empty
     const now = new Date();
     const dateLabel = now.toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
     const runName = bulkRunName.trim() || `${dateLabel} Batch · ${validRows.length} article${validRows.length !== 1 ? "s" : ""}`;
 
-    // Create run in DB and get runId
+    // Create the run record in DB
     let activeRunId: string | null = null;
     try {
       const res = await fetch("/api/bulk", {
@@ -442,9 +632,10 @@ export function ContentGeneratorTab({
       });
       const d = await res.json() as { runId?: string };
       activeRunId = d.runId || null;
-      setBulkRunId(activeRunId);
-    } catch { /* non-fatal — continue without persistence */ }
+    } catch { /* non-fatal */ }
+    setBulkRunId(activeRunId);
 
+    // Build items — all start as "waiting"
     const items: BulkItem[] = validRows.map((r, i) => ({
       ...r,
       id: i,
@@ -458,225 +649,134 @@ export function ContentGeneratorTab({
       qualityScore: 0,
       error: "",
       articlePath: "",
+      pipeline,
     }));
-
-    // Mutable local mirror of items so we can save accurate snapshots to DB
-    const localItems = items.map((i) => ({ ...i }));
-
-    const saveSnapshot = (overrides?: { status?: string; completedAt?: string }) => {
-      if (!activeRunId) return;
-      const done = localItems.filter((i) => i.stage === "done").length;
-      const failed = localItems.filter((i) => i.stage === "error").length;
-      const totalWords = localItems.reduce((s, i) => s + i.wordCount, 0);
-      fetch("/api/bulk", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ runId: activeRunId, done, failed, totalWords, items: localItems, ...overrides }),
-      }).catch(() => {});
-    };
 
     setBulkItems(items);
     setBulkRunning(true);
     setBulkCurrentIndex(0);
 
-    // Live timer — ticks every second to update elapsed time for active item
+    // Queue on server — background worker (bulk-worker PM2 process) picks this up
+    if (activeRunId) {
+      try {
+        await fetch("/api/bulk", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "queueRun", runId: activeRunId, items }),
+        });
+      } catch { /* non-fatal */ }
+    }
+
+    // Poll server every 5s to get live progress from the background worker
+    const pollRun = async () => {
+      if (!activeRunId) return;
+      try {
+        const res = await fetch(`/api/bulk?runId=${activeRunId}`);
+        if (!res.ok) return;
+        lastPollAtRef.current = Date.now();
+        const data = await res.json() as { status?: string; items?: BulkItem[] };
+        if (data.items) {
+          // Preserve client-side elapsed counter for running items — DB has elapsed=0 until done
+          setBulkItems((prev) =>
+            data.items!.map((item) => {
+              if (item.stage === "running") {
+                const prevItem = prev.find((p) => p.id === item.id);
+                return { ...item, elapsed: prevItem?.elapsed ?? 0 };
+              }
+              return item;
+            })
+          );
+          const runningIdx = data.items.findIndex((i) => i.stage === "running");
+          if (runningIdx >= 0) setBulkCurrentIndex(runningIdx);
+        }
+        // Stop polling when worker finishes or run is paused
+        if (data.status === "done" || data.status === "paused_server") {
+          if (bulkPollRef.current) { clearInterval(bulkPollRef.current); bulkPollRef.current = null; }
+          if (bulkTimerRef.current) { clearInterval(bulkTimerRef.current); bulkTimerRef.current = null; }
+          // Mark not-running FIRST so no reconnect warning can flash during final fetch
+          setBulkRunning(false);
+          setBulkCurrentIndex(-1);
+          // Final fetch — ensure item states reflect actual terminal state
+          try {
+            const finalRes = await fetch(`/api/bulk?runId=${activeRunId}`);
+            if (finalRes.ok) {
+              const finalData = await finalRes.json() as { items?: BulkItem[] };
+              if (finalData.items) setBulkItems(finalData.items);
+            }
+          } catch { /* ignore */ }
+          setBulkRunId(null);
+          setBulkRunName("");
+          onArticleGenerated?.();
+          loadArticles();
+          loadPastRuns();
+        }
+      } catch { /* ignore transient poll errors */ }
+    };
+
+    // Live elapsed counter — increments every second for items with stage="running"
     const timerInterval = setInterval(() => {
       setBulkItems((prev) =>
         prev.map((item) =>
-          item.startedAt && !item.finishedAt
-            ? { ...item, elapsed: Math.floor((Date.now() - item.startedAt) / 1000) }
+          item.stage === "running"
+            ? { ...item, elapsed: (item.elapsed || 0) + 1 }
             : item
         )
       );
     }, 1000);
     bulkTimerRef.current = timerInterval;
 
-    const controller = new AbortController();
-    bulkAbortRef.current = controller;
-
-    for (let idx = 0; idx < items.length; idx++) {
-      if (controller.signal.aborted) break;
-
-      setBulkCurrentIndex(idx);
-
-      // Mark item as starting
-      setBulkItems((prev) =>
-        prev.map((item, i) =>
-          i === idx ? { ...item, stage: "queued", startedAt: Date.now(), elapsed: 0 } : item
-        )
-      );
-      localItems[idx] = { ...localItems[idx], stage: "queued", startedAt: Date.now(), elapsed: 0 };
-
-      try {
-        const res = await fetch("/api/generate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ topic: items[idx].topic, subKeywords: items[idx].subKeywords, region: items[idx].region || region, articleType: items[idx].category || undefined, pipeline }),
-          signal: controller.signal,
-        });
-
-        if (!res.ok) {
-          const err = await res.json();
-          throw new Error(err.error || `HTTP ${res.status}`);
-        }
-
-        const reader = res.body?.getReader();
-        if (!reader) throw new Error("No response stream");
-
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            try {
-              const event: ProgressEvent = JSON.parse(line.slice(6));
-
-              setBulkItems((prev) =>
-                prev.map((item, i) => {
-                  if (i !== idx) return item;
-                  const updates: Partial<BulkItem> = { stage: event.stage };
-
-                  if (event.stage === "done" && event.detail) {
-                    const d = event.detail;
-                    updates.finishedAt = Date.now();
-                    updates.elapsed = item.startedAt
-                      ? Math.floor((Date.now() - item.startedAt) / 1000)
-                      : 0;
-                    updates.wordCount = (d.wordCount as number) || 0;
-                    updates.tableCount = (d.tableCount as number) || 0;
-                    updates.qualityGrade = (d.qualityGrade as string) || "";
-                    updates.qualityScore = (d.qualityScore as number) || 0;
-                    updates.articlePath = (d.articlePath as string) || "";
-                  }
-                  if (event.stage === "error") {
-                    updates.finishedAt = Date.now();
-                    updates.elapsed = item.startedAt
-                      ? Math.floor((Date.now() - item.startedAt) / 1000)
-                      : 0;
-                    updates.error = event.message;
-                  }
-
-                  return { ...item, ...updates };
-                })
-              );
-
-              // Notify library to refresh when a bulk article finishes
-              if (event.stage === "done") onArticleGenerated?.();
-
-              // Mirror to localItems for DB snapshots
-              if (event.stage === "done" && event.detail) {
-                const d = event.detail;
-                localItems[idx] = {
-                  ...localItems[idx],
-                  stage: "done",
-                  finishedAt: Date.now(),
-                  elapsed: localItems[idx].startedAt ? Math.floor((Date.now() - localItems[idx].startedAt!) / 1000) : 0,
-                  wordCount: (d.wordCount as number) || 0,
-                  tableCount: (d.tableCount as number) || 0,
-                  qualityGrade: (d.qualityGrade as string) || "",
-                  qualityScore: (d.qualityScore as number) || 0,
-                  articlePath: (d.articlePath as string) || "",
-                };
-              } else if (event.stage === "error") {
-                localItems[idx] = {
-                  ...localItems[idx],
-                  stage: "error",
-                  error: event.message,
-                  finishedAt: Date.now(),
-                  elapsed: localItems[idx].startedAt ? Math.floor((Date.now() - localItems[idx].startedAt!) / 1000) : 0,
-                }
-              } else {
-                localItems[idx] = { ...localItems[idx], stage: event.stage };
-              }
-            } catch {
-              // skip malformed lines
-            }
-          }
-        }
-
-        // If pipeline ended without explicit done/error, mark done
-        setBulkItems((prev) =>
-          prev.map((item, i) => {
-            if (i !== idx) return item;
-            if (!item.finishedAt) {
-              return {
-                ...item,
-                stage: "done",
-                finishedAt: Date.now(),
-                elapsed: item.startedAt ? Math.floor((Date.now() - item.startedAt) / 1000) : 0,
-              };
-            }
-            return item;
-          })
-        );
-        if (!localItems[idx].finishedAt) {
-          localItems[idx] = { ...localItems[idx], stage: "done", finishedAt: Date.now(), elapsed: localItems[idx].startedAt ? Math.floor((Date.now() - localItems[idx].startedAt!) / 1000) : 0 };
-        }
-      } catch (err) {
-        if ((err as Error).name === "AbortError") {
-          setBulkItems((prev) =>
-            prev.map((item, i) => {
-              if (i === idx && !item.finishedAt) {
-                return {
-                  ...item,
-                  stage: "error",
-                  error: "Cancelled",
-                  finishedAt: Date.now(),
-                  elapsed: item.startedAt ? Math.floor((Date.now() - item.startedAt) / 1000) : 0,
-                };
-              }
-              return item;
-            })
-          );
-          localItems[idx] = { ...localItems[idx], stage: "error", error: "Cancelled", finishedAt: Date.now() };
-          saveSnapshot();
-          break;
-        }
-        setBulkItems((prev) =>
-          prev.map((item, i) =>
-            i === idx
-              ? {
-                  ...item,
-                  stage: "error",
-                  error: (err as Error).message,
-                  finishedAt: Date.now(),
-                  elapsed: item.startedAt ? Math.floor((Date.now() - item.startedAt) / 1000) : 0,
-                }
-              : item
-          )
-        );
-        localItems[idx] = { ...localItems[idx], stage: "error", error: (err as Error).message, finishedAt: Date.now() };
-      }
-
-      // Save snapshot after each item finishes
-      saveSnapshot();
-    }
-
-    // Mark run complete
-    saveSnapshot({ status: "done", completedAt: new Date().toISOString() });
-
-    clearInterval(timerInterval);
-    bulkTimerRef.current = null;
-    setBulkRunning(false);
-    setBulkCurrentIndex(-1);
-    bulkAbortRef.current = null;
-    setBulkRunName("");
-    setBulkRunId(null);
-    loadArticles(); // refresh article list
-    loadPastRuns(); // refresh run history
-  }, [bulkRows, bulkRunning, bulkRunName, region, loadArticles, loadPastRuns]);
+    // Start polling immediately, then every 5s
+    pollRun();
+    const pollInterval = setInterval(pollRun, 5000);
+    bulkPollRef.current = pollInterval;
+  }, [bulkRows, bulkRunning, bulkRunName, region, onArticleGenerated, loadArticles, loadPastRuns]);
 
   const cancelBulkGeneration = useCallback(() => {
+    const stoppingRunId = bulkRunId;
+    // Send pause signal to server — worker finishes current article(s) then stops
+    if (stoppingRunId) {
+      fetch("/api/bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "stopRun", runId: stoppingRunId }),
+      }).catch(() => {});
+    }
+    // Clear existing intervals
+    if (bulkPollRef.current) { clearInterval(bulkPollRef.current); bulkPollRef.current = null; }
+    if (bulkTimerRef.current) { clearInterval(bulkTimerRef.current); bulkTimerRef.current = null; }
     bulkAbortRef.current?.abort();
-  }, []);
+    // Mark as stopping — keep polling until worker actually settles
+    setBulkRunning(false);
+    setBulkStopping(true);
+    setBulkCurrentIndex(-1);
+    if (!stoppingRunId) { setBulkStopping(false); return; }
+    // Poll every 3s until no running items remain
+    const stopPoll = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/bulk?runId=${stoppingRunId}`);
+        if (!res.ok) return;
+        const data = await res.json() as { status?: string; items?: Array<{ stage: string }> };
+        if (data.items) setBulkItems(data.items as BulkItem[]);
+        const stillRunning = (data.items || []).filter(i => i.stage === "running").length;
+        if (data.status === "paused_server" || data.status === "done" || stillRunning === 0) {
+          clearInterval(stopPoll);
+          // Final authoritative fetch before clearing state
+          try {
+            const finalStopRes = await fetch(`/api/bulk?runId=${stoppingRunId}`);
+            if (finalStopRes.ok) {
+              const finalStopData = await finalStopRes.json() as { items?: BulkItem[] };
+              if (finalStopData.items) setBulkItems(finalStopData.items);
+            }
+          } catch { /* ignore */ }
+          setBulkStopping(false);
+          setBulkRunId(null);
+          setBulkRunName("");
+          loadArticles();
+          loadPastRuns();
+        }
+      } catch { /* ignore */ }
+    }, 3000);
+  }, [bulkRunId, loadArticles, loadPastRuns]);
 
   // Retry a single failed bulk item by id
   const retryBulkItem = useCallback((itemId: number) => {
@@ -691,6 +791,92 @@ export function ContentGeneratorTab({
     if (failedRows.length === 0 || bulkRunning) return;
     startBulkGeneration(failedRows);
   }, [bulkItems, bulkRunning, startBulkGeneration]);
+
+  // On mount: resume any active bulk run (running_server or queued_server)
+  useEffect(() => {
+    fetch("/api/bulk")
+      .then((r) => r.json())
+      .then((data: { runs?: Array<{ id: string; name: string; status: string; done: number; failed: number; total: number }> }) => {
+        if (!data.runs) return;
+        // Prefer actively running over queued — matches worker processing order
+        const active =
+          data.runs.find((r) => r.status === "running_server") ??
+          data.runs.find((r) => r.status === "queued_server");
+        if (!active) return;
+        // Load its full items
+        fetch(`/api/bulk?runId=${active.id}`)
+          .then((r) => r.json())
+          .then((run: { id: string; name: string; status: string; items?: BulkItem[] }) => {
+            if (!run.items) return;
+            setBulkRunId(active.id);
+            setBulkRunName(active.name);
+            setBulkRunning(true);
+            setBulkItems(run.items);
+            setMode("bulk");
+            const runningIdx = run.items.findIndex((i) => i.stage === "running");
+            if (runningIdx >= 0) setBulkCurrentIndex(runningIdx);
+
+            // Start polling
+            const pollRun = async () => {
+              try {
+                const res = await fetch(`/api/bulk?runId=${active.id}`);
+                if (!res.ok) return;
+                lastPollAtRef.current = Date.now();
+                const data2 = await res.json() as { status: string; done: number; failed: number; items?: BulkItem[] };
+                if (data2.items) {
+                  setBulkItems((prev) =>
+                    data2.items!.map((item) => {
+                      if (item.stage === "running") {
+                        const prevItem = prev.find((p) => p.id === item.id);
+                        return { ...item, elapsed: prevItem?.elapsed ?? 0 };
+                      }
+                      return item;
+                    })
+                  );
+                  const ri = data2.items.findIndex((i) => i.stage === "running");
+                  if (ri >= 0) setBulkCurrentIndex(ri);
+                }
+                if (data2.status === "done" || data2.status === "paused_server") {
+                  if (bulkPollRef.current) { clearInterval(bulkPollRef.current); bulkPollRef.current = null; }
+                  if (bulkTimerRef.current) { clearInterval(bulkTimerRef.current); bulkTimerRef.current = null; }
+                  // Mark not-running FIRST so no reconnect warning can flash
+                  setBulkRunning(false);
+                  setBulkCurrentIndex(-1);
+                  // Final fetch — ensure item states reflect actual terminal state
+                  try {
+                    const finalRes2 = await fetch(`/api/bulk?runId=${active.id}`);
+                    if (finalRes2.ok) {
+                      const finalData2 = await finalRes2.json() as { items?: BulkItem[] };
+                      if (finalData2.items) setBulkItems(finalData2.items);
+                    }
+                  } catch { /* ignore */ }
+                  setBulkRunId(null);
+                  setBulkRunName("");
+                  loadArticles();
+                  loadPastRuns();
+                }
+              } catch { /* ignore */ }
+            };
+
+            // Live elapsed counter
+            const timerInterval = setInterval(() => {
+              setBulkItems((prev) =>
+                prev.map((item) =>
+                  item.stage === "running" ? { ...item, elapsed: (item.elapsed || 0) + 1 } : item
+                )
+              );
+            }, 1000);
+            bulkTimerRef.current = timerInterval;
+
+            pollRun();
+            const pollInterval = setInterval(pollRun, 5000);
+            bulkPollRef.current = pollInterval;
+          })
+          .catch(() => {});
+      })
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Cleanup timer on unmount
   useEffect(() => {
@@ -754,59 +940,35 @@ export function ContentGeneratorTab({
 
   return (
     <div className="max-w-4xl space-y-6">
-      {/* ── Mode + Pipeline Toggle Row ── */}
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        {/* Mode tabs */}
-        <div className="flex items-center gap-1 p-1 rounded-lg bg-th-bg-secondary w-fit">
-          {([
-            { id: "single" as const, label: "Single Article" },
-            { id: "bulk" as const, label: "Bulk Generate" },
-            { id: "news" as const, label: "News Pipeline" },
-          ]).map((m) => (
-            <button
-              key={m.id}
-              onClick={() => { if (!generating && !bulkRunning) setMode(m.id); }}
-              className={`px-4 py-2 text-sm font-medium rounded-md transition-all ${
-                mode === m.id
-                  ? "bg-th-card text-th-accent shadow-sm"
-                  : "text-th-text-muted hover:text-th-text"
-              }`}
-            >
-              {m.label}
-            </button>
-          ))}
+      {/* ── Pipeline Toggle (Single + Bulk only) ── */}
+      {mode !== "news" && (
+        <div className="flex items-center gap-1 rounded-lg bg-th-bg-secondary p-1 border border-th-border w-fit">
+          <button
+            type="button"
+            onClick={() => { setPipeline("cg"); setArticleType(""); }}
+            disabled={generating || bulkRunning}
+            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+              pipeline === "cg"
+                ? "bg-th-card text-th-text shadow-sm border border-th-border"
+                : "text-th-text-muted hover:text-th-text"
+            }`}
+          >
+            Content Generator
+          </button>
+          <button
+            type="button"
+            onClick={() => { setPipeline("atlas"); setArticleType(""); setCustomOutline(""); setShowCustomOutline(false); }}
+            disabled={generating || bulkRunning}
+            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+              pipeline === "atlas"
+                ? "bg-th-accent text-white shadow-sm"
+                : "text-th-text-muted hover:text-th-text"
+            }`}
+          >
+            ✶ ATLAS Smart Writer
+          </button>
         </div>
-
-        {/* Pipeline toggle — hidden for News (news always uses CG) */}
-        {mode !== "news" && (
-          <div className="flex items-center gap-1 rounded-lg bg-th-bg-secondary p-1 border border-th-border">
-            <button
-              type="button"
-              onClick={() => { setPipeline("cg"); setArticleType(""); }}
-              disabled={generating || bulkRunning}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                pipeline === "cg"
-                  ? "bg-th-card text-th-text shadow-sm border border-th-border"
-                  : "text-th-text-muted hover:text-th-text"
-              }`}
-            >
-              Content Generator
-            </button>
-            <button
-              type="button"
-              onClick={() => { setPipeline("atlas"); setArticleType(""); setCustomOutline(""); setShowCustomOutline(false); }}
-              disabled={generating || bulkRunning}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                pipeline === "atlas"
-                  ? "bg-th-accent text-white shadow-sm"
-                  : "text-th-text-muted hover:text-th-text"
-              }`}
-            >
-              ✦ ATLAS Smart Writer
-            </button>
-          </div>
-        )}
-      </div>
+      )}
 
       {/* ATLAS info banner — shown across all modes */}
       {pipeline === "atlas" && mode !== "news" && (
@@ -1049,14 +1211,52 @@ export function ContentGeneratorTab({
             )}
 
             {/* Running controls */}
-            {bulkRunning && (
+            {(bulkRunning || bulkStopping) && (
               <div className="flex items-center gap-3">
-                <button onClick={cancelBulkGeneration} className="cs-btn cs-btn-secondary text-th-danger">
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 7.5A2.25 2.25 0 017.5 5.25h9a2.25 2.25 0 012.25 2.25v9a2.25 2.25 0 01-2.25 2.25h-9a2.25 2.25 0 01-2.25-2.25v-9z" />
-                  </svg>
-                  Stop
-                </button>
+                {bulkRunName && !bulkStopping && (
+                  <span className="text-xs text-th-text-muted truncate max-w-[200px]" title={bulkRunName}>
+                    ⚡ <strong className="text-th-text">{bulkRunName}</strong>
+                  </span>
+                )}
+                {bulkStopping ? (
+                  <div className="flex items-center gap-2 text-sm text-th-text-muted">
+                    <span className="w-4 h-4 rounded-full border-2 border-th-danger border-t-transparent animate-spin" />
+                    Stopping… killing running articles
+                  </div>
+                ) : (
+                  <>
+                    {bulkErrors > 0 && bulkRunId && (
+                      <button
+                        onClick={async () => {
+                          await fetch("/api/bulk", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ action: "retryErrors", runId: bulkRunId }),
+                          });
+                          // Refresh items so UI reflects the reset
+                          const res = await fetch(`/api/bulk?runId=${bulkRunId}`);
+                          if (res.ok) {
+                            const d = await res.json() as { items?: BulkItem[] };
+                            if (d.items) setBulkItems(d.items);
+                          }
+                        }}
+                        className="cs-btn cs-btn-secondary text-th-accent flex items-center gap-1.5"
+                        title="Reset all failed articles to waiting so worker retries them"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" />
+                        </svg>
+                        Retry {bulkErrors} Failed
+                      </button>
+                    )}
+                    <button onClick={cancelBulkGeneration} className="cs-btn cs-btn-secondary text-th-danger">
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 7.5A2.25 2.25 0 017.5 5.25h9a2.25 2.25 0 012.25 2.25v9a2.25 2.25 0 01-2.25 2.25h-9a2.25 2.25 0 01-2.25-2.25v-9z" />
+                      </svg>
+                      Stop
+                    </button>
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -1067,9 +1267,14 @@ export function ContentGeneratorTab({
               {/* Overall progress bar */}
               <div className="mb-5">
                 <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-sm font-semibold text-th-text">
-                    Progress: {bulkDone + bulkErrors} of {bulkTotal}
-                    {bulkErrors > 0 && <span className="text-th-danger ml-1">({bulkErrors} failed)</span>}
+                  <h3 className="text-sm font-semibold text-th-text flex flex-col gap-0.5">
+                    {bulkRunName && (
+                      <span className="text-[11px] font-normal text-th-text-muted truncate max-w-[280px]" title={bulkRunName}>{bulkRunName}</span>
+                    )}
+                    <span>
+                      Progress: {bulkDone + bulkErrors} of {bulkTotal}
+                      {bulkErrors > 0 && <span className="text-th-danger ml-1">({bulkErrors} failed)</span>}
+                    </span>
                   </h3>
                   <div className="flex items-center gap-3 text-xs text-th-text-muted">
                     {bulkAvgTime > 0 && <span>~{bulkAvgTime}s/article</span>}
@@ -1078,7 +1283,7 @@ export function ContentGeneratorTab({
                         ETA: {bulkEta >= 60 ? `${Math.floor(bulkEta / 60)}m ${bulkEta % 60}s` : `${bulkEta}s`}
                       </span>
                     )}
-                    {!bulkRunning && bulkDone + bulkErrors === bulkTotal && (
+                    {!bulkRunning && !bulkStopping && bulkDone + bulkErrors === bulkTotal && (
                       <span className="text-th-success font-medium">Complete</span>
                     )}
                   </div>
@@ -1091,17 +1296,70 @@ export function ContentGeneratorTab({
                 </div>
               </div>
 
-              {/* Item tracker rows */}
-              <div className="space-y-2">
-                {bulkItems.map((item, idx) => {
-                  const isActive = item.startedAt !== null && !item.finishedAt;
+              {/* Queue-wait notice: all items waiting because worker is on an older run */}
+              {bulkRunning && !bulkStopping && bulkItems.length > 0 && bulkItems.every((i) => i.stage === "waiting") && (
+                <div className="mb-4 p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20 text-xs flex items-start gap-2">
+                  <svg className="w-4 h-4 shrink-0 text-yellow-500 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6l4 2m6-2a10 10 0 11-20 0 10 10 0 0120 0z" />
+                  </svg>
+                  <span className="text-yellow-700 dark:text-yellow-400">
+                    <strong>Queued — waiting for the worker.</strong> Another batch is currently being processed.
+                    This run will start automatically when that batch finishes or is stopped from the Past Runs panel below.
+                  </span>
+                </div>
+              )}
+
+              {/* Item tracker rows — compact summary for large batches */}
+              {bulkTotal > 50 && (
+                <div className="mb-3 grid grid-cols-4 gap-2 text-center">
+                  <div className="p-2 rounded-lg bg-th-success-soft"><p className="text-lg font-bold text-th-success">{bulkDone}</p><p className="text-[10px] text-th-text-muted">Done</p></div>
+                  <div className="p-2 rounded-lg bg-th-accent/10"><p className="text-lg font-bold text-th-accent">{bulkItems.filter(i => i.stage === "running").length}</p><p className="text-[10px] text-th-text-muted">Running</p></div>
+                  <div className="p-2 rounded-lg bg-th-bg-secondary"><p className="text-lg font-bold text-th-text">{bulkItems.filter(i => i.stage === "waiting").length}</p><p className="text-[10px] text-th-text-muted">Waiting</p></div>
+                  <div className="p-2 rounded-lg bg-th-danger-soft"><p className="text-lg font-bold text-th-danger">{bulkErrors}</p><p className="text-[10px] text-th-text-muted">Failed</p></div>
+                </div>
+              )}
+              {bulkTotal > 50 && (
+                <div className="mb-3 p-3 rounded-lg bg-th-bg-secondary text-xs text-th-text-muted flex flex-wrap gap-3 items-center">
+                  {bulkAvgTime > 0 && <span>avg {bulkAvgTime >= 60 ? `${Math.floor(bulkAvgTime/60)}m ${bulkAvgTime%60}s` : `${bulkAvgTime}s`}/article</span>}
+                  {bulkEta > 0 && bulkRunning && <span className="text-th-accent font-medium">ETA: {bulkEta >= 3600 ? `${Math.floor(bulkEta/3600)}h ${Math.floor((bulkEta%3600)/60)}m` : bulkEta >= 60 ? `${Math.floor(bulkEta/60)}m ${bulkEta%60}s` : `${bulkEta}s`} · done ~{new Date(Date.now() + bulkEta*1000).toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"})}</span>}
+                  {!bulkRunning && !bulkStopping && bulkTotal > 0 && bulkItems.filter(i => i.stage === "running" || i.stage === "waiting").length === 0 && <span className="text-th-success font-medium">Batch complete</span>}
+                  {!bulkRunning && !bulkStopping && bulkItems.filter(i => i.stage === "running").length > 0 && Date.now() - lastPollAtRef.current > 15000 && (
+                    <span className="flex items-center gap-2 text-th-warning font-medium">
+                      ⚠ Lost connection —
+                      <button
+                        onClick={() => window.location.reload()}
+                        className="underline text-th-accent"
+                      >Reload</button>
+                    </span>
+                  )}
+                  {bulkStopping && (
+                    <span className="flex items-center gap-2 text-th-text-muted font-medium">
+                      <span className="w-3 h-3 rounded-full border-2 border-th-danger border-t-transparent animate-spin" />
+                      Stopping… (finishing kills, may take a few seconds)
+                    </span>
+                  )}
+                </div>
+              )}
+              <div className={`space-y-2 ${bulkTotal > 50 ? "max-h-[520px] overflow-y-auto pr-1" : ""}`}>
+                {(bulkTotal > 50
+                  ? [...bulkItems.filter(i=>i.stage==="running"), ...bulkItems.filter(i=>i.stage==="error"), ...bulkItems.filter(i=>i.stage==="done"), ...bulkItems.filter(i=>i.stage==="waiting")]
+                  : bulkItems
+                ).map((item, idx) => {
+                  const isActive = item.stage === "running";
                   const isDone = item.stage === "done";
                   const isError = item.stage === "error";
                   const isWaiting = item.stage === "waiting";
 
+                  const isRunning = item.stage === "running";
                   const stageLabel = isWaiting
                     ? "Waiting"
-                    : STAGES.find((s) => s.id === item.stage)?.label || (isError ? "Error" : item.stage);
+                    : isRunning
+                    ? (item.currentPhase || "Running...")
+                    : isDone
+                    ? "Done"
+                    : isError
+                    ? "Error"
+                    : item.stage;
 
                   const stageIdx = STAGES.findIndex((s) => s.id === item.stage);
                   const stagePercent = isDone
@@ -1200,16 +1458,21 @@ export function ContentGeneratorTab({
 
                         {/* Timer */}
                         <div className="text-right shrink-0 min-w-[60px]">
-                          {(isActive || isDone || isError) && (
-                            <p className={`text-sm font-mono font-semibold tabular-nums ${
-                              isActive ? "text-th-accent" : isDone ? "text-th-success" : "text-th-danger"
-                            }`}>
+                          {isActive && (
+                            <p className="text-sm font-mono font-semibold tabular-nums text-th-accent">
                               {item.elapsed >= 60
                                 ? `${Math.floor(item.elapsed / 60)}:${String(item.elapsed % 60).padStart(2, "0")}`
                                 : `${item.elapsed}s`}
                             </p>
                           )}
-                          {isWaiting && (
+                          {(isDone || isError) && item.elapsed > 0 && (
+                            <p className={`text-sm font-mono font-semibold tabular-nums ${isDone ? "text-th-success" : "text-th-danger"}`}>
+                              {item.elapsed >= 60
+                                ? `${Math.floor(item.elapsed / 60)}m${String(item.elapsed % 60).padStart(2, "0")}s`
+                                : `${item.elapsed}s`}
+                            </p>
+                          )}
+                          {(isWaiting || ((isDone || isError) && item.elapsed === 0)) && (
                             <p className="text-xs text-th-text-muted">—</p>
                           )}
                         </div>
@@ -1233,8 +1496,7 @@ export function ContentGeneratorTab({
                                 const parts = item.articlePath.split("/");
                                 const slug = parts.length >= 2 ? parts[parts.length - 2] : "";
                                 if (slug) {
-                                  setMode("single");
-                                  viewArticle(slug);
+                                  onViewInLibrary?.(slug);
                                 }
                               }}
                               className="text-xs text-th-accent hover:underline"
@@ -1250,7 +1512,7 @@ export function ContentGeneratorTab({
               </div>
 
               {/* Summary when complete */}
-              {!bulkRunning && bulkDone + bulkErrors === bulkTotal && bulkTotal > 0 && (
+              {!bulkRunning && !bulkStopping && bulkDone + bulkErrors === bulkTotal && bulkTotal > 0 && (
                 <div className="mt-4 p-4 rounded-lg bg-th-success-soft">
                   <div className="flex items-center gap-2 mb-2">
                     <svg className="w-5 h-5 text-th-success" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -1334,9 +1596,12 @@ export function ContentGeneratorTab({
               <p className="text-sm text-th-text-muted py-2">No past runs yet. Start a batch above to track it here.</p>
             ) : (
               <div className="space-y-2">
-                {pastRuns.map((run) => {
+                {pastRuns.filter(run => run.id !== bulkRunId).map((run) => {
                   const isExpanded = expandedRunId === run.id;
                   const successRate = run.total > 0 ? Math.round((run.done / run.total) * 100) : 0;
+                  const isPaused = run.status === "paused_server";
+                  const isQueued = run.status === "queued_server";
+                  const isRunningServer = run.status === "running_server";
                   return (
                     <div key={run.id} className="border border-th-border rounded-lg overflow-hidden">
                       {/* Run header row */}
@@ -1370,6 +1635,17 @@ export function ContentGeneratorTab({
                             {run.completed_at && (
                               <span className="ml-1">· {Math.round((new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 60000)}m total</span>
                             )}
+                            {(isQueued || isRunningServer) && run.total > run.done && (() => {
+                              const remaining = run.total - run.done;
+                              const etaMins = remaining * 5;
+                              if (isQueued && run.queuePosition > 0) {
+                                const runningRun = pastRuns.find((r) => r.status === "running_server");
+                                const blockerMins = runningRun ? (runningRun.total - runningRun.done) * 5 : 0;
+                                const startIn = blockerMins;
+                                return <span className="ml-1 text-yellow-500 font-medium">· starts in ~{startIn >= 60 ? `${Math.floor(startIn/60)}h ${startIn%60}m` : `${startIn}m`} · then ~{etaMins >= 60 ? `${Math.floor(etaMins/60)}h ${etaMins%60}m` : `${etaMins}m`} to complete</span>;
+                              }
+                              return <span className="ml-1 text-th-accent font-medium">· ~{etaMins >= 60 ? `${Math.floor(etaMins/60)}h ${etaMins%60}m` : `${etaMins}m`} left · done ~{new Date(Date.now() + etaMins*60000).toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"})}</span>;
+                            })()}
                           </p>
                         </div>
 
@@ -1384,20 +1660,39 @@ export function ContentGeneratorTab({
                           <div className="w-16 h-1.5 bg-th-border rounded-full overflow-hidden">
                             <div className="h-full bg-th-success rounded-full" style={{ width: `${successRate}%` }} />
                           </div>
-                          {/* Resume — only for incomplete runs */}
+                          {/* Status badge — shows queue position for queued runs */}
+                          {(isPaused || isQueued || isRunningServer) && (
+                            <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${
+                              isRunningServer ? "bg-th-accent/20 text-th-accent" :
+                              isQueued && run.queuePosition === 1 ? "bg-yellow-500/20 text-yellow-500" :
+                              isQueued ? "bg-orange-500/20 text-orange-500" :
+                              "bg-th-border text-th-text-muted"
+                            }`}>
+                              {isRunningServer ? "⚡ Running"
+                                : isQueued && run.queuePosition === 1 ? "⏳ Up next"
+                                : isQueued && run.queuePosition > 1 ? `⏳ Queue #${run.queuePosition + 1}`
+                                : isQueued ? "⏳ Queued"
+                                : "⏸ Paused"}
+                            </span>
+                          )}
+                          {/* Resume — for paused server runs use resumeRun API */}
                           {run.done < run.total && !bulkRunning && (
                             <button
                               onClick={async (e) => {
                                 e.stopPropagation();
-                                // Load items if not already expanded
+                                const remaining = run.total - run.done;
+                                if (!confirm(`Resume "${run.name}"?\n\n${remaining} article${remaining !== 1 ? "s" : ""} remaining — this will restart API usage.`)) return;
+                                if (isPaused) {
+                                  await fetch("/api/bulk", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "resumeRun", runId: run.id }) });
+                                  loadPastRuns();
+                                  return;
+                                }
                                 let items: BulkItem[] = expandedRunId === run.id ? expandedRunItems : [];
                                 if (items.length === 0) {
                                   const d = await fetch(`/api/bulk?runId=${run.id}`).then(r => r.json()) as { items?: BulkItem[] };
                                   items = d.items || [];
                                 }
-                                const pending: BulkRow[] = items
-                                  .filter(i => i.stage !== "done")
-                                  .map(i => ({ id: i.id, topic: i.topic, subKeywords: (i as BulkItem & { subKeywords?: string }).subKeywords || "", category: (i as BulkItem & { category?: string }).category || "", region: (i as BulkItem & { region?: string }).region || "India" }));
+                                const pending: BulkRow[] = items.filter(i => i.stage !== "done").map(i => ({ id: i.id, topic: i.topic, subKeywords: (i as BulkItem & { subKeywords?: string }).subKeywords || "", category: (i as BulkItem & { category?: string }).category || "", region: (i as BulkItem & { region?: string }).region || "India" }));
                                 if (pending.length === 0) return;
                                 setBulkRunName(`Resume: ${run.name}`);
                                 setMode("bulk");
@@ -1439,7 +1734,16 @@ export function ContentGeneratorTab({
                           ) : expandedRunItems.length === 0 ? (
                             <p className="text-sm text-th-text-muted">No item data saved for this run.</p>
                           ) : (
-                            expandedRunItems.map((item, i) => {
+                            <>
+                            {expandedRunItems.length > 50 && (
+                              <div className="mb-2 grid grid-cols-4 gap-2 text-center text-xs">
+                                {[{l:"Done",n:expandedRunItems.filter(i=>i.stage==="done").length,c:"bg-th-success-soft text-th-success"},{l:"Running",n:expandedRunItems.filter(i=>i.stage==="running").length,c:"bg-th-accent/10 text-th-accent"},{l:"Waiting",n:expandedRunItems.filter(i=>i.stage==="waiting").length,c:"bg-th-bg-secondary text-th-text"},{l:"Failed",n:expandedRunItems.filter(i=>i.stage==="error").length,c:"bg-th-danger-soft text-th-danger"}].map(s=>(
+                                  <div key={s.l} className={`p-2 rounded-lg ${s.c}`}><p className="font-bold text-base">{s.n}</p><p className="opacity-70 text-[10px]">{s.l}</p></div>
+                                ))}
+                              </div>
+                            )}
+                            <div className={expandedRunItems.length > 50 ? "max-h-[480px] overflow-y-auto pr-1 space-y-1.5" : "space-y-1.5"}>
+                            {[...expandedRunItems.filter(i=>i.stage==="running"), ...expandedRunItems.filter(i=>i.stage==="error"), ...[...expandedRunItems.filter(i=>i.stage==="done")].sort((a,b)=>(b.finishedAt??0)-(a.finishedAt??0)), ...expandedRunItems.filter(i=>i.stage==="waiting")].map((item, i) => {
                               const isDone = item.stage === "done";
                               const isError = item.stage === "error";
                               return (
@@ -1467,7 +1771,7 @@ export function ContentGeneratorTab({
                                       onClick={() => {
                                         const parts = item.articlePath.split("/");
                                         const slug = parts.length >= 2 ? parts[parts.length - 2] : "";
-                                        if (slug) { setMode("single"); viewArticle(slug); }
+                                        if (slug) { onViewInLibrary?.(slug); }
                                       }}
                                       className="text-xs text-th-accent hover:underline shrink-0"
                                     >
@@ -1476,7 +1780,9 @@ export function ContentGeneratorTab({
                                   )}
                                 </div>
                               );
-                            })
+                            })}
+                            </div>
+                            </>
                           )}
                         </div>
                       )}
@@ -1491,7 +1797,7 @@ export function ContentGeneratorTab({
 
       {/* ── NEWS MODE ── */}
       {mode === "news" && <NewsPipeline
-        onView={(slug) => { setMode("single"); viewArticle(slug); }}
+        onView={(slug) => { onViewInLibrary?.(slug); }}
         onRefreshArticles={() => { loadArticles(); onArticleGenerated?.(); }}
       />}
 
@@ -1666,6 +1972,17 @@ export function ContentGeneratorTab({
                 Cancel
               </button>
             )}
+            <button
+              onClick={addToQueue}
+              disabled={!topic.trim()}
+              className="cs-btn cs-btn-secondary"
+              title="Add to queue — processes after current article finishes"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+              </svg>
+              Add to Queue
+            </button>
             {!generating && result && (
               <button
                 onClick={() => {
@@ -1689,10 +2006,169 @@ export function ContentGeneratorTab({
         </div>
       </div>
 
+      {/* ── Queue List ── */}
+      {singleQueue.length > 0 && (
+        <div className="cs-card p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-th-text">Queue ({singleQueue.filter(q => q.status !== "done" && q.status !== "error").length} pending)</h3>
+            <div className="flex gap-2">
+              {!generating && singleQueue.some(q => q.status === "waiting") && (
+                <button onClick={processQueueNow} className="cs-btn cs-btn-primary text-xs px-2.5 py-1.5">
+                  ▶ Start Queue
+                </button>
+              )}
+              <button
+                onClick={() => { setSingleQueue([]); singleQueueRef.current = []; }}
+                disabled={generating}
+                className="text-xs text-th-text-muted hover:text-th-danger transition-colors"
+              >
+                Clear all
+              </button>
+            </div>
+          </div>
+          <div className="space-y-1.5 max-h-48 overflow-y-auto">
+            {singleQueue.map((item) => (
+              <div key={item.id} className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm ${
+                item.status === "running" ? "bg-th-accent/10 border border-th-accent/30" :
+                item.status === "done" ? "bg-th-success/10" :
+                item.status === "error" ? "bg-th-danger/10" :
+                "bg-th-bg-secondary"
+              }`}>
+                <span className="shrink-0 text-base">
+                  {item.status === "running" ? <span className="inline-block w-4 h-4 border-2 border-th-accent border-t-transparent rounded-full animate-spin" /> :
+                   item.status === "done" ? "✓" :
+                   item.status === "error" ? "✗" : "⏳"}
+                </span>
+                <span className={`flex-1 truncate ${item.status === "done" ? "text-th-text-muted line-through" : item.status === "error" ? "text-th-danger" : "text-th-text"}`}>
+                  {item.topic}
+                </span>
+                <span className={`text-xs shrink-0 ${
+                  item.status === "running" ? "text-th-accent" :
+                  item.status === "done" ? "text-th-success" :
+                  item.status === "error" ? "text-th-danger" : "text-th-text-muted"
+                }`}>
+                  {item.status === "running" ? "Generating..." : item.status === "done" ? "Done" : item.status === "error" ? "Failed" : "Waiting"}
+                </span>
+                {item.status === "waiting" && (
+                  <button
+                    onClick={() => setSingleQueue(prev => { const u = prev.filter(q => q.id !== item.id); singleQueueRef.current = u; return u; })}
+                    className="text-th-text-muted hover:text-th-danger transition-colors shrink-0"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Recent Single Articles ── */}
+      {!generating && !currentStage && recentSingleJobs.length > 0 && (
+        <div className="cs-card p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-th-text">Recent Articles</h3>
+            <button
+              onClick={loadSingleHistory}
+              className="text-xs text-th-text-muted hover:text-th-text transition-colors"
+              title="Refresh"
+            >
+              {historyLoading ? (
+                <span className="inline-block w-3.5 h-3.5 rounded-full border-2 border-th-accent border-t-transparent animate-spin" />
+              ) : (
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                </svg>
+              )}
+            </button>
+          </div>
+          <div className="space-y-1.5 max-h-72 overflow-y-auto pr-0.5">
+            {recentSingleJobs.map((job) => {
+              const isDone  = job.status === "done";
+              const isErr   = job.status === "error";
+              const isActive = job.status === "running" || job.status === "queued";
+              const elapsedS = Math.round(job.elapsedMs / 1000);
+              const elapsedFmt = elapsedS >= 60 ? `${Math.floor(elapsedS/60)}m${String(elapsedS%60).padStart(2,"0")}s` : `${elapsedS}s`;
+              const slugMatch = job.articlePath.match(/output\/([^/]+)\/article\.html/);
+              const slug = slugMatch?.[1] ?? "";
+              return (
+                <div
+                  key={job.id}
+                  className={`flex items-center gap-2.5 p-2.5 rounded-lg transition-colors text-xs ${
+                    isDone  ? "bg-th-success/5 hover:bg-th-success/10"
+                    : isErr  ? "bg-th-danger/5 hover:bg-th-danger/10"
+                    : isActive ? "bg-th-accent/5"
+                    : "bg-th-bg-secondary"
+                  }`}
+                >
+                  {isActive ? (
+                    <span className="w-5 h-5 rounded-full border-2 border-th-accent border-t-transparent animate-spin shrink-0" />
+                  ) : isDone ? (
+                    job.qualityGrade ? (
+                      <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold shrink-0 ${
+                        job.qualityGrade.startsWith("A") ? "bg-th-success text-white"
+                          : job.qualityGrade.startsWith("B") ? "bg-th-accent text-white"
+                          : "bg-yellow-500 text-white"
+                      }`}>{job.qualityGrade.charAt(0)}</span>
+                    ) : (
+                      <svg className="w-5 h-5 text-th-success shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                      </svg>
+                    )
+                  ) : (
+                    <svg className="w-5 h-5 text-th-danger shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  )}
+                  <span className={`flex-1 min-w-0 font-medium truncate ${isDone ? "text-th-text" : isErr ? "text-th-danger/80" : isActive ? "text-th-accent" : "text-th-text-muted"}`}
+                        title={job.topic}>
+                    {job.topic || "(no topic)"}
+                  </span>
+                  {isDone && job.wordCount > 0 && (
+                    <span className="text-th-text-muted shrink-0 tabular-nums">{job.wordCount.toLocaleString()}w</span>
+                  )}
+                  {isDone && elapsedS > 5 && (
+                    <span className="text-th-text-muted shrink-0 tabular-nums">{elapsedFmt}</span>
+                  )}
+                  {isErr && job.error && (
+                    <span className="text-th-danger/70 shrink-0 max-w-[140px] truncate" title={job.error}>{job.error}</span>
+                  )}
+                  <span className="text-th-text-muted shrink-0 tabular-nums">
+                    {new Date(job.createdAt).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
+                  </span>
+                  {isDone && slug && (
+                    <button onClick={() => onViewInLibrary?.(slug)} className="text-th-accent hover:underline shrink-0 font-semibold">View</button>
+                  )}
+                  {isErr && !generating && (
+                    <button onClick={() => { setTopic(job.topic); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                            className="text-th-accent hover:underline shrink-0 font-semibold">Retry</button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* ── Pipeline Progress ── */}
       {currentStage && (
         <div className="cs-card p-6">
-          <h3 className="text-sm font-semibold text-th-text mb-5">Pipeline Progress</h3>
+          <div className="flex items-start justify-between mb-5">
+            <div className="min-w-0 flex-1">
+              <h3 className="text-sm font-semibold text-th-text">Pipeline Progress</h3>
+              {currentGeneratingTopic && (
+                <p className="text-xs text-th-accent mt-0.5 truncate font-medium" title={currentGeneratingTopic}>
+                  {currentGeneratingTopic}
+                </p>
+              )}
+              {generationStartTime && (
+                <p className="text-[11px] text-th-text-muted mt-0.5">
+                  Started {new Date(generationStartTime).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
+                  {" · "}{Math.floor((Date.now() - generationStartTime) / 60000)}m elapsed
+                </p>
+              )}
+            </div>
+          </div>
 
           {/* Stage indicators */}
           <div className="flex items-center gap-1 mb-6">
@@ -1808,13 +2284,27 @@ export function ContentGeneratorTab({
                   { label: "Words", value: result.wordCount || "—" },
                   { label: "Tables", value: result.tableCount || "—" },
                   { label: "API Calls", value: result.apiCalls || "—" },
-                  { label: "Quality", value: result.qualityScore ? `${result.qualityScore}/100` : result.qualityGrade || "—" },
                 ].map((s) => (
                   <div key={s.label}>
                     <p className="text-xs text-th-text-muted">{s.label}</p>
                     <p className="text-lg font-bold text-th-text">{String(s.value)}</p>
                   </div>
                 ))}
+                <div>
+                  <p className="text-xs text-th-text-muted">Quality</p>
+                  {result.qualityGrade ? (
+                    <div className="flex flex-col items-center gap-0.5 mt-1">
+                      <span className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold ${
+                        String(result.qualityGrade).startsWith("A") ? "bg-th-success text-white"
+                          : String(result.qualityGrade).startsWith("B") ? "bg-th-accent text-white"
+                          : "bg-yellow-500 text-white"
+                      }`}>{String(result.qualityGrade)}</span>
+                      {(result.qualityScore as number) > 0 && <span className="text-[10px] text-th-text-muted">{String(result.qualityScore)}/100</span>}
+                    </div>
+                  ) : (
+                    <p className="text-lg font-bold text-th-text">—</p>
+                  )}
+                </div>
               </div>
               {result.time != null && (
                 <p className="text-xs text-th-text-muted mt-3 text-center">
@@ -1838,7 +2328,7 @@ export function ContentGeneratorTab({
               </svg>
               Event Log ({events.length})
             </button>
-            <div id="event-log" className="hidden max-h-48 overflow-y-auto rounded-lg bg-th-bg-secondary p-3 space-y-1">
+            <div id="event-log" className="max-h-48 overflow-y-auto rounded-lg bg-th-bg-secondary p-3 space-y-1">
               {events.map((e, i) => (
                 <div key={i} className="flex items-start gap-2 text-xs">
                   <StageBadge stage={e.stage} />
@@ -1933,10 +2423,10 @@ export function ContentGeneratorTab({
           <div className="space-y-2 max-h-64 overflow-y-auto">
             {atlasRunsList.slice(0, 20).map((run) => {
               const statusColor =
-                run.status === "done"    ? "text-green-400 bg-green-950/40 border-green-900/40" :
-                run.status === "running" ? "text-blue-400 bg-blue-950/40 border-blue-900/40" :
-                run.status === "failed"  ? "text-red-400 bg-red-950/40 border-red-900/40" :
-                                           "text-gray-400 bg-gray-800/40 border-gray-700/40";
+                run.status === "done"    ? "text-th-success bg-th-success-soft border-th-success/30" :
+                run.status === "running" ? "text-th-accent bg-th-accent/10 border-th-accent/30" :
+                run.status === "failed"  ? "text-th-danger bg-th-danger-soft border-th-danger/30" :
+                                           "text-th-text-muted bg-th-bg-secondary border-th-border";
               const checkpointLabel: Record<string, string> = {
                 done: "Complete", writing: "Stage 8 — Writing", outline: "Stage 7 — Outline",
                 verified: "Stage 6 — Verified", blueprint: "Stage 1 — Blueprint", queued: "Not started",
@@ -1947,7 +2437,7 @@ export function ContentGeneratorTab({
                   <div className="flex-1 min-w-0">
                     <p className="text-th-text truncate font-medium">{run.topic}</p>
                     <p className="text-th-text-muted">{run.started} · {checkpointLabel[run.checkpoint] ?? run.checkpoint}</p>
-                    {run.error && <p className="text-red-400 truncate">{run.error}</p>}
+                    {run.error && <p className="text-th-danger truncate">{run.error}</p>}
                   </div>
                   <span className={`px-2 py-0.5 rounded border text-xs font-medium shrink-0 ${statusColor}`}>
                     {run.status}
@@ -1964,7 +2454,7 @@ export function ContentGeneratorTab({
                     {(run.status === "failed" || run.status === "running") && (
                       <button
                         onClick={() => { setTopic(run.topic); if (run.articleType) setArticleType(run.articleType); }}
-                        className="px-2 py-1 rounded bg-blue-950/40 hover:bg-blue-900/40 text-blue-400 border border-blue-900/40 transition-colors"
+                        className="px-2 py-1 rounded bg-th-accent/10 hover:bg-th-accent/20 text-th-accent border border-th-accent/30 transition-colors"
                       >
                         {run.status === "running" ? "Reconnect" : "Resume"}
                       </button>
@@ -1985,15 +2475,6 @@ export function ContentGeneratorTab({
         </div>
       )}
 
-      {/* ── Article Library ── */}
-      {!generating && <ArticleLibrary
-        articles={recentArticles}
-        loading={loadingList}
-        activeSlug={article?.slug}
-        onView={(slug) => viewArticle(slug)}
-        onBack={() => { setArticle(null); setCurrentStage(null); setResult(null); }}
-        showBack={!!article}
-      />}
       </>
       )}
     </div>
@@ -3110,7 +3591,7 @@ interface NewsSource {
   id: string; name: string; url: string; source_type: string; category: string; enabled: number;
 }
 interface NewsItem {
-  id: string; title: string; url: string; source: string; tags: string; published: string; status: string;
+  id: string; title: string; url: string; source: string; tags: string; published: string; status: string; created_at?: string; run_id?: string;
 }
 interface NewsRun {
   id: string; status: string; items_found: number; started_at: string; completed_at: string | null;
@@ -3145,8 +3626,17 @@ function NewsPipeline({ onView, onRefreshArticles }: { onView: (slug: string) =>
   const [newsGenError, setNewsGenError] = useState("");
   const [newsGenStartTime, setNewsGenStartTime] = useState(0);
   const [newsGenElapsed, setNewsGenElapsed] = useState(0);
-  const newsAbortRef = useRef<AbortController | null>(null);
+  const [activeFilter, setActiveFilter] = useState<"new" | "all" | "used">("new");
+  const [langFilter, setLangFilter] = useState<"all" | "en" | "hi" | "regional">("all");
+  const [autoDiscover, setAutoDiscover] = useState(false);
+  const [nextDiscoveryIn, setNextDiscoveryIn] = useState(0);
+  const newsJobPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const newsTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const autoDiscoverRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const autoDiscoverCountdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [newsQueue, setNewsQueue] = useState<Array<{id: number; title: string; url: string; newsItemId: string; status: "waiting" | "running" | "done" | "error"; error?: string}>>([]);
+  const newsQueueIdRef = useRef(0);
+  const newsQueueRef = useRef<typeof newsQueue>([]);
 
   // News generation timer
   useEffect(() => {
@@ -3159,8 +3649,27 @@ function NewsPipeline({ onView, onRefreshArticles }: { onView: (slug: string) =>
     if (newsTimerRef.current) clearInterval(newsTimerRef.current);
   }, [newsGenerating, newsGenStartTime]);
 
-  // Generate news article
-  const generateNews = useCallback(async (title: string, competitorUrl?: string) => {
+  // Mark news item as used (done)
+  const markDone = useCallback(async (id: string) => {
+    await fetch("/api/news", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "mark-done", id }),
+    });
+    setItems((prev) => prev.map((item) => item.id === id ? { ...item, status: "used" } : item));
+  }, []);
+
+  const unmarkDone = useCallback(async (id: string) => {
+    await fetch("/api/news", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "unmark-done", id }),
+    });
+    setItems((prev) => prev.map((item) => item.id === id ? { ...item, status: "discovered" } : item));
+  }, []);
+
+  // Generate news article — uses server job polling (fire-and-forget, same as single article)
+  const generateNews = useCallback(async (title: string, competitorUrl?: string, newsItemId?: string, queueItemId?: number) => {
     if (newsGenerating) return;
     setNewsGenerating(true);
     setNewsGenTopic(title);
@@ -3170,69 +3679,118 @@ function NewsPipeline({ onView, onRefreshArticles }: { onView: (slug: string) =>
     setNewsGenError("");
     setNewsGenStartTime(Date.now());
     setNewsGenElapsed(0);
-
-    const controller = new AbortController();
-    newsAbortRef.current = controller;
+    if (queueItemId != null) {
+      setNewsQueue(prev => { const u = prev.map(q => q.id === queueItemId ? {...q, status: "running" as const} : q); newsQueueRef.current = u; return u; });
+    }
 
     try {
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ topic: title, type: "news", competitorUrl }),
-        signal: controller.signal,
       });
       if (!res.ok) {
         const err = await res.json();
         throw new Error(err.error || `HTTP ${res.status}`);
       }
+      const { serverJobId } = await res.json() as { serverJobId: string; contentId: string; jobId: string };
 
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error("No response stream");
-      const decoder = new TextDecoder();
-      let buffer = "";
+      const poll = async () => {
+        try {
+          const r = await fetch(`/api/jobs?id=${serverJobId}`);
+          if (!r.ok) return;
+          const job = await r.json() as {
+            status: string;
+            progress: { stage?: string; message?: string; detail?: Record<string, unknown>; log?: Array<{ stage: string; message: string; time: string }> };
+          };
+          const stage = (job.progress?.stage ?? "queued") as Stage;
+          setNewsGenStage(stage);
+          const serverLog = (job.progress?.log as Array<{ stage: string; message: string; time: string }> | undefined) ?? [];
+          if (serverLog.length > 0) {
+            setNewsGenEvents(serverLog.map((e) => ({ stage: e.stage as Stage, message: e.message, timestamp: new Date(e.time).getTime() })));
+          }
+          if (job.status === "done") {
+            const detail = job.progress?.detail ?? {};
+            setNewsGenResult(detail as Record<string, unknown>);
+            if (newsItemId) markDone(newsItemId);
+            onRefreshArticles();
+            if (newsJobPollRef.current) { clearInterval(newsJobPollRef.current); newsJobPollRef.current = null; }
+            if (queueItemId != null) {
+              setNewsQueue(prev => { const u = prev.map(q => q.id === queueItemId ? {...q, status: "done" as const} : q); newsQueueRef.current = u; return u; });
+            }
+            setNewsGenerating(false);
+            // Auto-process next in queue
+            const nextItem = newsQueueRef.current.find(q => q.status === "waiting");
+            if (nextItem) {
+              setTimeout(() => generateNews(nextItem.title, nextItem.url, nextItem.newsItemId, nextItem.id), 500);
+            }
+          } else if (job.status === "error") {
+            setNewsGenError(job.progress?.message ?? "Generation failed");
+            setNewsGenStage("error");
+            if (newsJobPollRef.current) { clearInterval(newsJobPollRef.current); newsJobPollRef.current = null; }
+            if (queueItemId != null) {
+              setNewsQueue(prev => { const u = prev.map(q => q.id === queueItemId ? {...q, status: "error" as const, error: job.progress?.message} : q); newsQueueRef.current = u; return u; });
+            }
+            setNewsGenerating(false);
+            // Try next item even after error
+            const nextItem = newsQueueRef.current.find(q => q.status === "waiting");
+            if (nextItem) {
+              setTimeout(() => generateNews(nextItem.title, nextItem.url, nextItem.newsItemId, nextItem.id), 500);
+            }
+          }
+        } catch { /* ignore transient poll errors */ }
+      };
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const event: ProgressEvent = JSON.parse(line.slice(6));
-            setNewsGenEvents((prev) => [...prev, event]);
-            setNewsGenStage(event.stage);
-            if (event.stage === "done" && event.detail) { setNewsGenResult(event.detail); }
-            if (event.stage === "error") setNewsGenError(event.message);
-          } catch { /* skip */ }
-        }
-      }
+      poll();
+      newsJobPollRef.current = setInterval(poll, 3000);
     } catch (err) {
-      if ((err as Error).name === "AbortError") {
-        setNewsGenError("Cancelled");
-      } else {
-        setNewsGenError((err as Error).message);
-      }
+      setNewsGenError((err as Error).message);
       setNewsGenStage("error");
-    } finally {
       setNewsGenerating(false);
-      newsAbortRef.current = null;
-      onRefreshArticles();
     }
-  }, [newsGenerating, onRefreshArticles]);
+  }, [newsGenerating, markDone, onRefreshArticles]);
 
-  // Load data on mount
+  // Auto-discovery interval — runs every 5 minutes when enabled
+  useEffect(() => {
+    if (autoDiscover && !discovering) {
+      const INTERVAL_MS = 5 * 60 * 1000;
+      setNextDiscoveryIn(INTERVAL_MS / 1000);
+
+      autoDiscoverCountdownRef.current = setInterval(() => {
+        setNextDiscoveryIn((prev) => {
+          if (prev <= 1) return INTERVAL_MS / 1000;
+          return prev - 1;
+        });
+      }, 1000);
+
+      autoDiscoverRef.current = setInterval(() => {
+        setNextDiscoveryIn(INTERVAL_MS / 1000);
+        runDiscovery();
+      }, INTERVAL_MS);
+
+      return () => {
+        if (autoDiscoverRef.current) { clearInterval(autoDiscoverRef.current); autoDiscoverRef.current = null; }
+        if (autoDiscoverCountdownRef.current) { clearInterval(autoDiscoverCountdownRef.current); autoDiscoverCountdownRef.current = null; }
+      };
+    } else {
+      if (autoDiscoverRef.current) { clearInterval(autoDiscoverRef.current); autoDiscoverRef.current = null; }
+      if (autoDiscoverCountdownRef.current) { clearInterval(autoDiscoverCountdownRef.current); autoDiscoverCountdownRef.current = null; }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoDiscover]);
+
+  // Load data + restore auto-discovery state from server config on mount
   useEffect(() => {
     Promise.all([
       fetch("/api/news?view=sources").then((r) => r.json()),
       fetch("/api/news?view=discovered").then((r) => r.json()),
       fetch("/api/news?view=runs").then((r) => r.json()),
-    ]).then(([s, d, r]) => {
+      fetch("/api/config").then((r) => r.json()),
+    ]).then(([s, d, r, cfg]) => {
       setSources(s.sources || []);
       setItems(d.items || []);
       setRuns(r.runs || []);
+      if ((cfg as Record<string,string>).news_auto_discovery === "1") setAutoDiscover(true);
     }).finally(() => setLoading(false));
   }, []);
 
@@ -3245,7 +3803,7 @@ function NewsPipeline({ onView, onRefreshArticles }: { onView: (slug: string) =>
     });
   }, [suggestions.length]);
 
-  // Discover news
+  // Discover news — fire-and-forget: returns runId immediately, poll news_runs for completion
   const runDiscovery = useCallback(async () => {
     setDiscovering(true);
     try {
@@ -3254,19 +3812,32 @@ function NewsPipeline({ onView, onRefreshArticles }: { onView: (slug: string) =>
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "discover" }),
       });
-      const data = await res.json();
+      const data = await res.json() as { runId?: string; error?: string };
       if (!res.ok) throw new Error(data.error || "Discovery failed");
 
-      // Refresh items and runs
-      const [d, r] = await Promise.all([
-        fetch("/api/news?view=discovered").then((r) => r.json()),
-        fetch("/api/news?view=runs").then((r) => r.json()),
-      ]);
-      setItems(d.items || []);
-      setRuns(r.runs || []);
+      const runId = data.runId;
+      if (!runId) { setDiscovering(false); return; }
+
+      // Poll news_runs every 5s until this run is done
+      const poll = setInterval(async () => {
+        try {
+          const r = await fetch("/api/news?view=runs").then((resp) => resp.json()) as { runs?: Array<{ id: string; status: string }> };
+          const run = r.runs?.find((x) => x.id === runId);
+          if (!run) return;
+          if (run.status === "done" || run.status === "error") {
+            clearInterval(poll);
+            const [d, rs] = await Promise.all([
+              fetch("/api/news?view=discovered").then((resp) => resp.json()),
+              fetch("/api/news?view=runs").then((resp) => resp.json()),
+            ]);
+            setItems((d as { items?: unknown[] }).items as typeof items || []);
+            setRuns((rs as { runs?: unknown[] }).runs as typeof runs || []);
+            setDiscovering(false);
+          }
+        } catch { /* ignore */ }
+      }, 5000);
     } catch (err) {
       alert((err as Error).message);
-    } finally {
       setDiscovering(false);
     }
   }, []);
@@ -3332,9 +3903,30 @@ function NewsPipeline({ onView, onRefreshArticles }: { onView: (slug: string) =>
     });
   }, []);
 
+  // Detect script/language of a title
+  const detectLang = (title: string): "en" | "hi" | "regional" => {
+    const devanagari = /[\u0900-\u097F]/;  // Hindi, Marathi, Sanskrit
+    const southIndian = /[\u0B00-\u0B7F\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F]/; // Odia, Tamil, Telugu, Kannada, Malayalam
+    const other = /[\u0980-\u09FF\u0A00-\u0A7F\u0A80-\u0AFF]/; // Bengali, Punjabi, Gujarati
+    if (devanagari.test(title)) return "hi";
+    if (southIndian.test(title) || other.test(title)) return "regional";
+    return "en";
+  };
+
   // Filter items
   const q = newsSearch.toLowerCase();
+  const latestRunId = runs[0]?.id ?? "";
   const filteredItems = items.filter((item) => {
+    if (activeFilter === "new") {
+      if (item.status === "used") return false;
+      // Show all undiscovered items regardless of run — ON CONFLICT preserves original run_id
+      // so items re-discovered in later runs still carry their first-run run_id
+    } else if (activeFilter === "used") {
+      if (item.status !== "used") return false;
+    }
+    if (langFilter !== "all") {
+      if (detectLang(item.title) !== langFilter) return false;
+    }
     if (q) {
       const hay = `${item.title} ${item.source} ${item.tags}`.toLowerCase();
       return q.split(/\s+/).every((t) => hay.includes(t));
@@ -3342,6 +3934,18 @@ function NewsPipeline({ onView, onRefreshArticles }: { onView: (slug: string) =>
     return true;
   });
 
+  // Group filtered items by source for display
+  const groupedItems = filteredItems.reduce<Record<string, NewsItem[]>>((acc, item) => {
+    const src = item.source || "Other";
+    (acc[src] = acc[src] || []).push(item);
+    return acc;
+  }, {});
+
+  const newCount = items.filter((i) => i.status !== "used").length;
+  const enCount = items.filter((i) => detectLang(i.title) === "en").length;
+  const hiCount = items.filter((i) => detectLang(i.title) === "hi").length;
+  const regionalCount = items.filter((i) => detectLang(i.title) === "regional").length;
+  const usedCount = items.filter((i) => i.status === "used").length;
   const enabledCount = sources.filter((s) => s.enabled).length;
   const lastRun = runs[0];
   const sourcesByCategory = sources.reduce<Record<string, NewsSource[]>>((acc, s) => {
@@ -3435,8 +4039,70 @@ function NewsPipeline({ onView, onRefreshArticles }: { onView: (slug: string) =>
               </>
             )}
           </button>
+          <button
+            onClick={() => {
+              const next = !autoDiscover;
+              setAutoDiscover(next);
+              fetch("/api/config", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ news_auto_discovery: next ? "1" : "0" }),
+              }).catch(() => {});
+            }}
+            className={`cs-btn shrink-0 text-xs ${autoDiscover ? "cs-btn-secondary" : "cs-btn-ghost"}`}
+            title={autoDiscover ? "Auto-discovering every 5 min — click to disable" : "Enable auto-discovery every 5 min"}
+          >
+            <svg className={`w-3.5 h-3.5 ${autoDiscover ? "animate-spin" : ""}`} style={autoDiscover ? { animationDuration: "4s" } : {}} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+            </svg>
+            {autoDiscover ? String(nextDiscoveryIn) + "s" : "Auto"}
+          </button>
         </div>
       </div>
+
+      {/* ── News Queue ── */}
+      {newsQueue.length > 0 && (
+        <div className="cs-card p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-th-text">
+              News Queue ({newsQueue.filter(q => q.status !== "done" && q.status !== "error").length} pending)
+            </h3>
+            <button
+              onClick={() => { setNewsQueue([]); newsQueueRef.current = []; }}
+              disabled={newsGenerating}
+              className="text-xs text-th-text-muted hover:text-th-danger transition-colors"
+            >
+              Clear all
+            </button>
+          </div>
+          <div className="space-y-1.5 max-h-40 overflow-y-auto">
+            {newsQueue.map((item) => (
+              <div key={item.id} className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm ${
+                item.status === "running" ? "bg-th-accent/10 border border-th-accent/30" :
+                item.status === "done" ? "bg-th-success/10" :
+                item.status === "error" ? "bg-th-danger/10" :
+                "bg-th-bg-secondary"
+              }`}>
+                <span className="shrink-0">
+                  {item.status === "running" ? <span className="inline-block w-4 h-4 border-2 border-th-accent border-t-transparent rounded-full animate-spin" /> :
+                   item.status === "done" ? "✓" :
+                   item.status === "error" ? "✗" : "⏳"}
+                </span>
+                <span className={`flex-1 truncate text-xs ${item.status === "done" ? "text-th-text-muted line-through" : item.status === "error" ? "text-th-danger" : "text-th-text"}`}>
+                  {item.title}
+                </span>
+                <span className={`text-xs shrink-0 ${
+                  item.status === "running" ? "text-th-accent" :
+                  item.status === "done" ? "text-th-success" :
+                  item.status === "error" ? "text-th-danger" : "text-th-text-muted"
+                }`}>
+                  {item.status === "running" ? "Generating..." : item.status}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* ── News Generation Progress ── */}
       {(newsGenerating || newsGenStage) && (
@@ -3458,7 +4124,7 @@ function NewsPipeline({ onView, onRefreshArticles }: { onView: (slug: string) =>
                   : `${newsGenElapsed}s`}
               </span>
               {newsGenerating && (
-                <button onClick={() => newsAbortRef.current?.abort()} className="cs-btn cs-btn-ghost text-th-danger text-xs">
+                <button onClick={() => { if (newsJobPollRef.current) { clearInterval(newsJobPollRef.current); newsJobPollRef.current = null; } setNewsGenerating(false); setNewsGenStage("error"); setNewsGenError("Cancelled"); }} className="cs-btn cs-btn-ghost text-th-danger text-xs">
                   Cancel
                 </button>
               )}
@@ -3532,7 +4198,7 @@ function NewsPipeline({ onView, onRefreshArticles }: { onView: (slug: string) =>
                 <span className="px-1.5 py-0.5 rounded bg-th-accent/10 text-th-accent font-medium">News</span>
               </div>
               {/* View article button */}
-              {typeof newsGenResult.articlePath === "string" && (
+              {typeof newsGenResult.articlePath === "string" ? (
                 <button
                   onClick={() => {
                     const p = String(newsGenResult!.articlePath);
@@ -3544,6 +4210,8 @@ function NewsPipeline({ onView, onRefreshArticles }: { onView: (slug: string) =>
                 >
                   View Article
                 </button>
+              ) : (
+                <p className="mt-2 text-xs text-th-text-muted">Article saved to library — find it under the Content tab.</p>
               )}
             </div>
           )}
@@ -3681,23 +4349,69 @@ function NewsPipeline({ onView, onRefreshArticles }: { onView: (slug: string) =>
       {/* ── Discovered News Topics ── */}
       {items.length > 0 && (
         <div className="cs-card p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h4 className="text-sm font-semibold text-th-text">
-              Discovered Topics
-              <span className="text-th-text-muted font-normal ml-1">({filteredItems.length})</span>
-            </h4>
-            {selectedItems.size > 0 && !newsGenerating && (
+          {/* Header + filter tabs */}
+          <div className="flex items-start justify-between mb-4">
+            <div>
+              <h4 className="text-sm font-semibold text-th-text mb-1">Discovered Topics</h4>
+              <div className="flex items-center gap-1">
+                {([
+                  { id: "new", label: `New`, count: newCount },
+                  { id: "all", label: "All", count: items.length },
+                  { id: "used", label: "Done", count: usedCount },
+                ] as const).map((tab) => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setActiveFilter(tab.id)}
+                    className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                      activeFilter === tab.id
+                        ? "bg-th-accent text-white"
+                        : "bg-th-bg-secondary text-th-text-muted hover:text-th-text"
+                    }`}
+                  >
+                    {tab.label} <span className="opacity-70">({tab.count})</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            {selectedItems.size > 0 && (
               <div className="flex items-center gap-2">
                 <span className="text-xs text-th-text-muted">{selectedItems.size} selected</span>
                 <button
                   onClick={() => {
-                    const firstId = Array.from(selectedItems)[0];
-                    const item = items.find((i) => i.id === firstId);
-                    if (item) generateNews(item.title, item.url);
+                    const toQueue = Array.from(selectedItems)
+                      .map(id => items.find(i => i.id === id))
+                      .filter(Boolean) as typeof items;
+                    if (toQueue.length === 0) return;
+                    if (!newsGenerating && toQueue.length === 1) {
+                      // Single item — generate immediately
+                      generateNews(toQueue[0].title, toQueue[0].url, toQueue[0].id);
+                    } else {
+                      // Multiple or already running — queue all
+                      const newItems = toQueue.map(item => {
+                        const id = ++newsQueueIdRef.current;
+                        return { id, title: item.title, url: item.url, newsItemId: item.id, status: "waiting" as const };
+                      });
+                      setNewsQueue(prev => { const u = [...prev, ...newItems]; newsQueueRef.current = u; return u; });
+                      // Start first if not generating
+                      if (!newsGenerating) {
+                        const first = newItems[0];
+                        setTimeout(() => generateNews(first.title, first.url, first.newsItemId, first.id), 100);
+                      }
+                    }
+                    setSelectedItems(new Set());
                   }}
                   className="cs-btn cs-btn-primary text-xs"
                 >
-                  Generate News Article
+                  {newsGenerating ? `Queue ${selectedItems.size}` : `Generate ${selectedItems.size > 1 ? "All (" + selectedItems.size + ")" : "Article"}`}
+                </button>
+                <button
+                  onClick={() => {
+                    Array.from(selectedItems).forEach((id) => markDone(id));
+                    setSelectedItems(new Set());
+                  }}
+                  className="cs-btn cs-btn-ghost text-xs"
+                >
+                  Mark Done
                 </button>
               </div>
             )}
@@ -3717,62 +4431,130 @@ function NewsPipeline({ onView, onRefreshArticles }: { onView: (slug: string) =>
             />
           </div>
 
-          {/* Items list */}
-          <div className="space-y-1.5 max-h-96 overflow-y-auto">
-            {filteredItems.slice(0, 50).map((item) => {
-              const isSelected = selectedItems.has(item.id);
-              const timeAgo = item.published ? getTimeAgo(item.published) : "";
-              return (
-                <div
-                  key={item.id}
-                  className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${
-                    isSelected
-                      ? "border-th-accent bg-th-accent-soft"
-                      : "border-th-border hover:border-th-accent/50 hover:bg-th-card-hover"
-                  }`}
-                  onClick={() => toggleItem(item.id)}
-                >
-                  {/* Checkbox */}
-                  <div className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 mt-0.5 transition-colors ${
-                    isSelected ? "border-th-accent bg-th-accent" : "border-th-border"
-                  }`}>
-                    {isSelected && (
-                      <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-                      </svg>
-                    )}
-                  </div>
-
-                  {/* Content */}
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-th-text leading-snug">{item.title}</p>
-                    <div className="flex items-center gap-2 mt-1 text-[11px] text-th-text-muted">
-                      <span className="px-1.5 py-0.5 rounded bg-th-bg-secondary">{item.source}</span>
-                      {timeAgo && <span>{timeAgo}</span>}
-                    </div>
-                  </div>
-
-                  {/* Quick generate button */}
-                  <button
-                    onClick={(e) => { e.stopPropagation(); generateNews(item.title, item.url); }}
-                    disabled={newsGenerating}
-                    className="shrink-0 p-1.5 rounded text-th-accent hover:bg-th-accent-soft transition-colors disabled:opacity-40"
-                    title="Generate news article"
-                  >
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
-                    </svg>
-                  </button>
-                </div>
-              );
-            })}
+          {/* Language filter pills */}
+          <div className="flex items-center gap-1.5 mb-3 flex-wrap">
+            <span className="text-[11px] text-th-text-muted font-medium">Language:</span>
+            {([
+              { id: "all", label: "All" },
+              { id: "en", label: "English", count: enCount },
+              { id: "hi", label: "Hindi", count: hiCount },
+              { id: "regional", label: "Regional", count: regionalCount },
+            ] as const).map((l) => (
+              <button
+                key={l.id}
+                onClick={() => setLangFilter(l.id)}
+                className={`px-2.5 py-0.5 rounded-full text-[11px] font-medium transition-colors ${
+                  langFilter === l.id
+                    ? "bg-th-accent/20 text-th-accent border border-th-accent/40"
+                    : "bg-th-bg-secondary text-th-text-muted hover:text-th-text border border-transparent"
+                }`}
+              >
+                {l.label}{"count" in l ? ` (${l.count})` : ""}
+              </button>
+            ))}
           </div>
 
-          {filteredItems.length > 50 && (
-            <p className="text-xs text-th-text-muted text-center mt-3">
-              Showing 50 of {filteredItems.length} — use search to narrow down
-            </p>
-          )}
+          {/* Items grouped by source */}
+          <div className="space-y-4 max-h-[600px] overflow-y-auto">
+            {filteredItems.length === 0 ? (
+              <p className="text-sm text-th-text-muted text-center py-6">
+                {activeFilter === "new"
+                  ? "No new topics in latest run. Switch to the All tab to see everything."
+                  : activeFilter === "used"
+                  ? "No items marked as done yet."
+                  : "No topics match your search."}
+              </p>
+            ) : (
+              Object.entries(groupedItems).map(([source, groupItems]) => (
+                <div key={source}>
+                  <p className="text-[11px] font-semibold text-th-text-muted uppercase tracking-wider mb-1.5 sticky top-0 bg-th-card py-0.5">
+                    {source} <span className="font-normal normal-case">({groupItems.length})</span>
+                  </p>
+                  <div className="space-y-1.5">
+                    {groupItems.map((item) => {
+                      const isSelected = selectedItems.has(item.id);
+                      const isDone = item.status === "used";
+                      const publishedAgo = item.published ? getTimeAgo(item.published) : "";
+                      return (
+                        <div
+                          key={item.id}
+                          className={`flex items-start gap-3 p-3 rounded-lg border transition-all ${
+                            isDone
+                              ? "border-th-border/50 bg-th-bg-secondary/50 opacity-60"
+                              : isSelected
+                              ? "border-th-accent bg-th-accent-soft cursor-pointer"
+                              : "border-th-border hover:border-th-accent/50 hover:bg-th-card-hover cursor-pointer"
+                          }`}
+                          onClick={() => !isDone && toggleItem(item.id)}
+                        >
+                          {/* Checkbox / Done badge */}
+                          {isDone ? (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); unmarkDone(item.id); }}
+                              className="w-5 h-5 rounded border-2 border-th-success bg-th-success flex items-center justify-center shrink-0 mt-0.5 hover:opacity-70 transition-opacity"
+                              title="Undo — move back to queue"
+                            >
+                              <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                              </svg>
+                            </button>
+                          ) : (
+                            <div className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 mt-0.5 transition-colors ${
+                              isSelected ? "border-th-accent bg-th-accent" : "border-th-border"
+                            }`}>
+                              {isSelected && (
+                                <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                                </svg>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Content */}
+                          <div className="flex-1 min-w-0">
+                            <p className={`text-sm font-medium leading-snug ${isDone ? "line-through text-th-text-muted" : "text-th-text"}`}>
+                              {item.title}
+                            </p>
+                            <div className="flex items-center gap-2 mt-1 text-[11px] text-th-text-muted flex-wrap">
+                              {publishedAgo && <span title={item.published}>{publishedAgo}</span>}
+                              {isDone && <span className="text-th-success font-medium">Done</span>}
+                            </div>
+                          </div>
+
+                          {/* Actions */}
+                          {!isDone && (
+                            <div className="flex items-center gap-1 shrink-0">
+                              {/* Generate */}
+                              <button
+                                onClick={(e) => { e.stopPropagation(); generateNews(item.title, item.url, item.id); }}
+                                disabled={newsGenerating}
+                                className="p-1.5 rounded text-th-accent hover:bg-th-accent-soft transition-colors disabled:opacity-40"
+                                title="Generate news article"
+                              >
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                                </svg>
+                              </button>
+                              {/* Mark done */}
+                              <button
+                                onClick={(e) => { e.stopPropagation(); markDone(item.id); }}
+                                className="p-1.5 rounded text-th-text-muted hover:text-th-success hover:bg-th-success/10 transition-colors"
+                                title="Mark as done (skip)"
+                              >
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
         </div>
       )}
 

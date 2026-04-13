@@ -94,7 +94,7 @@ const GRADE_BG: Record<string, string> = {
 };
 
 /* ── Main Component ── */
-export default function ContentLibraryTab({ refreshKey = 0 }: { refreshKey?: number }) {
+export default function ContentLibraryTab({ refreshKey = 0, initialSlug }: { refreshKey?: number; initialSlug?: string }) {
   const [articles, setArticles] = useState<ArticleListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
@@ -105,7 +105,7 @@ export default function ContentLibraryTab({ refreshKey = 0 }: { refreshKey?: num
   const [pageSize, setPageSize] = useState(20);
 
   // Article detail state
-  const [activeSlug, setActiveSlug] = useState<string | null>(null);
+  const [activeSlug, setActiveSlug] = useState<string | null>(initialSlug ?? null);
   const [articleData, setArticleData] = useState<ArticleData | null>(null);
   const [loadingArticle, setLoadingArticle] = useState(false);
   const [resultTab, setResultTab] = useState<ResultTab>("preview");
@@ -128,6 +128,9 @@ export default function ContentLibraryTab({ refreshKey = 0 }: { refreshKey?: num
   }, []);
 
   useEffect(() => { fetchArticles(); }, [fetchArticles, refreshKey]);
+
+  // Auto-open article passed from another tab (e.g. News Pipeline view)
+  useEffect(() => { if (initialSlug) viewArticle(initialSlug); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // View article detail
   const viewArticle = async (slug: string) => {

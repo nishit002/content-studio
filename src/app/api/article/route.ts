@@ -49,7 +49,7 @@ export async function GET(req: NextRequest) {
             started:    String(r.started ?? ""),
             checkpoint,
             error:      r.error ? String(r.error) : null,
-            slug:       r.run_dir ? String(r.run_dir).replace(/^output\/\d+-/, "") : null,
+            slug:       r.run_dir ? path.basename(String(r.run_dir)) : null,
           };
         })
         .sort((a, b) => b.id.localeCompare(a.id)); // newest first

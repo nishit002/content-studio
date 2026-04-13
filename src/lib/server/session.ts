@@ -6,6 +6,21 @@ const SESSION_COOKIE = "cs-session";
 const SESSION_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
 
 export async function getSession(): Promise<string> {
+  // If PROJECT_SESSION_ID is set, all authenticated users share one project session.
+  // This ensures data (runs, content, config) is visible from any PC/browser.
+  const projectSessionId = process.env.PROJECT_SESSION_ID;
+  if (projectSessionId) {
+    const db = getDb();
+    const exists = db.prepare("SELECT id FROM sessions WHERE id = ?").get(projectSessionId);
+    if (!exists) {
+      db.prepare("INSERT INTO sessions (id) VALUES (?)").run(projectSessionId);
+      seedDefaults(projectSessionId);
+    } else {
+      db.prepare("UPDATE sessions SET last_active = datetime('now') WHERE id = ?").run(projectSessionId);
+    }
+    return projectSessionId;
+  }
+
   const cookieStore = await cookies();
   const existing = cookieStore.get(SESSION_COOKIE);
 

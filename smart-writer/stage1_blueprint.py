@@ -121,11 +121,16 @@ def classify_topic(topic: str, content_type: str) -> str:
     t = topic.lower()
 
     # Exam detection first — most specific
+    # Use word-boundary regex for short exam names to avoid false positives:
+    # "mat" in "information", "gre" in "greater", "cat" in "education", etc.
+    import re as _re
     exam_names = ["jee", "neet", "cuet", "cat", "mat", "gmat", "gre", "upsc", "gate",
                   "clat", "xat", "snap", "nmat", "cmat", "iift", "tissnet", "set"]
     exam_keywords = ["syllabus", "exam pattern", "eligibility", "admit card", "result",
                      "cutoff score", "mock test", "question paper"]
-    if content_type == "exam_guide" or any(e in t for e in exam_names) or any(k in t for k in exam_keywords):
+    _exam_name_match = any(_re.search(r"\b" + e + r"\b", t) for e in exam_names)
+    _exam_kw_match = any(k in t for k in exam_keywords)
+    if content_type == "exam_guide" or _exam_name_match or _exam_kw_match:
         return "exam_guide"
 
     # Placement
@@ -188,6 +193,7 @@ Return a JSON array (same order as input) where each item has:
 
 Rules:
 - data_needed must be SPECIFIC field names, not categories (BAD: "placement info", GOOD: "avg_package_lpa", "placement_rate_pct")
+- Do NOT embed the year in data_needed field names (BAD: "avg_package_lpa_2026", GOOD: "avg_package_lpa"). Year context comes from the topic; exact year matching is handled at extraction time.
 - search_queries must be targeted enough to find a specific page or PDF, not broad searches
 - For official Indian education sources use: site:nta.ac.in, site:iima.ac.in, site:nirfindia.org, site:josaa.nic.in, or filetype:pdf
 - Never invent data — search_queries must be able to find REAL sources

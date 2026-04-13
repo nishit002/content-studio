@@ -39,8 +39,9 @@ AI_PATTERNS = [
 
 HUMANIZE_SYSTEM = """\
 You are a professional editor specialising in Indian education content.
-Your job is to rewrite AI-generated prose to sound natural and human.
+Your job is to rewrite AI-generated prose to sound natural and human while preserving or improving analytical depth.
 You must ONLY rewrite <p> tag content. Leave all other HTML untouched.
+CRITICAL: Do NOT shorten paragraphs. Do NOT remove sentences. Do NOT strip analytical content. Better phrasing, never less content.
 """
 
 HUMANIZE_PROMPT = """\
@@ -49,7 +50,7 @@ Rewrite the prose in this HTML section to sound more natural and human.
 RULES (strictly follow all):
 1. Only rewrite text inside <p>...</p> tags. Do NOT change tables, headings, lists, or any other tags.
 2. Remove these AI phrases: {ai_phrases}
-3. Vary sentence length: mix short punchy sentences (8-12 words) with longer analytical ones (20-30 words).
+3. Vary sentence length naturally. Use substantive sentences of 15-30 words for analysis. Avoid choppy one-sentence paragraphs — each paragraph should make a complete analytical point.
 4. Keep all facts, numbers, and data EXACTLY as they are. You cannot change any number.
 5. Do not add new information. Do not remove facts.
 6. Return the complete section HTML with your rewrites applied.

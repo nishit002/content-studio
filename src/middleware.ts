@@ -16,6 +16,12 @@ export function middleware(req: NextRequest) {
     return NextResponse.next()
   }
 
+  // Allow internal server-to-server requests (e.g. news-worker cron)
+  const cronSecret = req.headers.get('x-cron-secret')
+  if (cronSecret && cronSecret === process.env.CRON_SECRET) {
+    return NextResponse.next()
+  }
+
   const token = req.cookies.get('cs_auth')?.value
   if (token !== VALID_TOKEN) {
     return NextResponse.redirect(new URL('/login', req.url))

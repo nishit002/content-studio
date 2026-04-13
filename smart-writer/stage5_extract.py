@@ -94,7 +94,7 @@ RANKINGS / SCORES — every rank MUST include:
 
 CONFLICTING SOURCES — if two sources give DIFFERENT values for the same field:
   - Report BOTH values in extraction_notes with their source URLs
-  - Use the official institution website value in data{} if available; otherwise use the more recent value
+  - Use the official institution website value in data{{}} if available; otherwise use the more recent value
   - Mark the field with "(verify: sources conflict)" appended to the value
 """
 
