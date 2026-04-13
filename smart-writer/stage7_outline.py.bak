@@ -86,9 +86,8 @@ If you have a strong verified stat (NIRF rank, avg package, founded year), inclu
 1. Only include sections where verified data EXISTS in the list above.
    If a sub-topic has has_data=false, DO NOT create a section for it.
 2. 3-8 sections total (not counting FAQ). Only include sections where has_data=true.
-   Word target per section: 700-900 words for prose/mixed sections; 500-700 for table-heavy sections.
-   These are MINIMUM floors — set word_target accordingly. A 400-word section is incomplete.
-   Do NOT invent sub-sections. Do NOT pad with repetition — hit the floor through analytical depth.
+   Word target per section: 500-700 words. This is a guide — write what the data supports. For sparse sections,
+   a 300-word accurate section beats a padded one. Do NOT invent sub-sections.
 3. Section headings must be concise keyword/topic phrases (5–8 words). They are navigation labels, NOT sentences.
    Use the entity short form or abbreviation (e.g. RUHS, IIM-A, BHU) not the full name unless needed for clarity.
    A heading CAN include one key fact but must NOT be a full statement or claim.
@@ -98,12 +97,7 @@ If you have a strong verified stat (NIRF rank, avg package, founded year), inclu
    GOOD: "Eligibility Criteria for MBBS & Other Courses"
    GOOD: "NEET UG & RUHS Entrance Exam Requirements"
    GOOD: "How to Apply: Step-by-Step Guide"
-4. SECTION ORDERING — for college_profile articles, the FIRST section MUST be the institution overview:
-   use the "College Overview & Key Facts" sub-topic (id: college_overview) as section 1.
-   If college_overview has insufficient data, still place it first and use data from other sub-topics
-   to write a contextual introduction. The order must be: Overview → Courses → Fees → Placements → Rankings → Campus.
-   Other article types: follow the typical competitor section order from the character research.
-4b. Each sub-topic id must appear in AT MOST ONE section's sub_topic_ids list.
+4. Each sub-topic id must appear in AT MOST ONE section's sub_topic_ids list.
    NEVER assign the same sub-topic to two different sections — this creates duplicate content.
 5. Adapt to the content character:
    - data-heavy: open each section with a data table, then analytical prose
@@ -125,7 +119,7 @@ Return a JSON object:
       "section_type": "table | prose | mixed | faq",
       "sub_topic_ids": ["id1", "id2"],
       "word_target": 750,
-      "format_hint": "lead with table, then 4-6 paragraphs of analytical prose — each paragraph: fact + context + student takeaway",
+      "format_hint": "lead with table, then 2 paragraphs of analysis",
       "content_character_note": "what the character research implies for this section"
     }}
   ],
@@ -143,7 +137,6 @@ def run(
     character: ArticleCharacter,
     verified_subtopics: list[VerifiedSubTopic],
     run_dir: Path,
-    writing_style: str = "comprehensive",
 ) -> ArticleOutline:
     """
     Run Stage 7. Returns ArticleOutline and saves outline.json to run_dir.
@@ -154,7 +147,7 @@ def run(
     if checkpoint.exists():
         log.info("Stage 7: loading from checkpoint")
         data = json.loads(checkpoint.read_text(encoding="utf-8"))
-        return _parse_outline(data, writing_style)
+        return _parse_outline(data)
 
     # Filter to sub-topics that have verified data
     with_data = [vst for vst in verified_subtopics if vst.has_data]
@@ -231,7 +224,7 @@ def run(
     checkpoint.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     log.info(f"Stage 7: outline saved → {len(result['sections'])} sections")
 
-    return _parse_outline(result, writing_style)
+    return _parse_outline(result)
 
 
 _GENERIC_TITLE_PATTERNS = [
@@ -306,7 +299,7 @@ def _build_verified_summary(verified_subtopics: list[VerifiedSubTopic]) -> str:
     return "\n".join(lines)
 
 
-def _parse_outline(data: dict, writing_style: str = "comprehensive") -> ArticleOutline:
+def _parse_outline(data: dict) -> ArticleOutline:
     sections = []
     for s in data.get("sections", []):
         sections.append(SectionPlan(
@@ -325,5 +318,4 @@ def _parse_outline(data: dict, writing_style: str = "comprehensive") -> ArticleO
         sections=sections,
         faq_questions=data.get("faq_questions", []),
         schema_type=data.get("schema_type", "Article"),
-        writing_style=writing_style,
     )

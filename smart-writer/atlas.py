@@ -176,6 +176,7 @@ def run_pipeline(
     force: bool = False,
     use_cg_research: bool = False,
     use_you_research: bool = False,
+    writing_style: str = "comprehensive",
 ) -> None:
     """
     Run the full ATLAS pipeline for a topic.
@@ -445,6 +446,12 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--style",
+        default="comprehensive",
+        choices=["comprehensive", "data_reference", "student_guide"],
+        help="Writing style: comprehensive (default), data_reference (max tables/bullets), student_guide (decision-focused)",
+    )
+    parser.add_argument(
         "--use-cg-research",
         action="store_true",
         help=(
@@ -475,6 +482,7 @@ Examples:
         force=args.force,
         use_cg_research=args.use_cg_research,
         use_you_research=args.use_you_research,
+        writing_style=args.style,
     )
 
 

@@ -26,6 +26,7 @@ export async function POST(req: NextRequest) {
     competitorUrl,
     customOutline,
     pipeline: pipelineChoice,
+    writingStyle,
   } = body as {
     topic?: string;
     subKeywords?: string;
@@ -34,6 +35,7 @@ export async function POST(req: NextRequest) {
     competitorUrl?: string;
     customOutline?: string;
     pipeline?: string;
+    writingStyle?: string;
   };
 
   if (!topic?.trim()) {
@@ -73,6 +75,7 @@ export async function POST(req: NextRequest) {
         message: "Queued — waiting for single-worker…",
         contentId,
         topic: topic.trim(),
+        writingStyle: writingStyle ?? 'comprehensive',
       })
     : createJob(sessionId, "single_article", {
         stage: "queued",

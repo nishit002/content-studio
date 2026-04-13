@@ -118,7 +118,8 @@ class ArticleOutline:
     sections: list[SectionPlan]
     faq_questions: list[str]       # derived from actual reader intent
     schema_type: str               # "Article" | "FAQPage" | "Course"
-
+    writing_style: str = "comprehensive"  # comprehensive | data_reference | student_guide
+    writing_style: str = "comprehensive"  # comprehensive | data_reference | student_guide
 
 # ─── Stage 8 / 9: Written Sections ───────────────────────────────────────────
 

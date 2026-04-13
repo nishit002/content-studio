@@ -15,8 +15,6 @@ Rules:
 """
 
 from __future__ import annotations
-import concurrent.futures
-import threading as _threading
 
 import json
 import logging
@@ -33,16 +31,63 @@ from models import (
 
 log = logging.getLogger("atlas.stage8")
 
-from stage8_styles import WRITER_SYSTEMS, FORMAT_RULES
+WRITER_SYSTEM = """\
+You are a factual Indian education content writer. Your only job is to convert verified data into clean HTML.
 
-# Backward compat
-WRITER_SYSTEM = WRITER_SYSTEMS["comprehensive"]
+HARD RULES — violating any of these makes the output useless:
+1. Every sentence of prose MUST be inside a <p> tag. Never write bare text outside HTML tags.
+2. Only use facts from the VERIFIED DATA block. If a fact is not in that block, do not write it.
+3. Never mention company names, alumni, or salaries unless they appear in the verified data block.
+4. Never use: "underscores", "reflects the institute's", "reinforcing", "position as a leader",
+   "it is worth noting", "furthermore", "notably", "importantly", "this highlights",
+   "in conclusion", "needless to say", "it should be noted", "strong academic reputation".
+5. YEAR ACCURACY: If a data value includes a year annotation like "(2024-25)" or "(2025)", always
+   preserve it. Do NOT write the article title year (e.g. 2026) when the data says otherwise.
+   When referencing older data write "as of 2025" or "as of 2024-25" — never substitute the
+   article title year into factual claims about when data was collected.
+6. Do NOT add JavaScript, charts, Canvas, image placeholders, or markdown code fences.
+7. Tables must only contain rows that have actual data from the verified data block. Never add placeholder rows.
+"""
+
+WRITER_PROMPT = """Write the HTML for ONE article section using ONLY the verified data below.
+
+Section heading: {heading}
+Word target: {word_target} words
+Section type: {section_type}
+Outline instruction: {format_hint}
+
+VERIFIED DATA (use ONLY this — nothing else):
+{verified_data_block}
+
+ALREADY COVERED in earlier sections (do NOT repeat):
+{already_covered}
+
+Focus keyword (use 1-2 times naturally): "{focus_keyword}"
+
+Output format rules:
+1. Start with <h2>{heading}</h2>
+2. Every sentence MUST be in a <p> tag. No bare text outside tags.
+3. TABLES — for any "mixed" or "table" section type, OR when the outline instruction mentions a table:
+   - Open with a <table class="data-table">. Use the outline instruction as a guide for what to include.
+   - Even 2-3 facts belong in a table — do not skip the table because there are few rows.
+   - After the table, write 3-5 analytical <p> tags, each with at least one specific fact/number. Short, direct sentences.
+4. PROSE-only sections: write 3-5 <p> tags, each 3-4 sentences. Every paragraph must contain at least one specific fact.
+5. SENTENCE STYLE: Short, direct sentences. State the fact, then one sentence of context. No flowery language.
+   GOOD: "The highest package at VIT Chennai hit INR 1 Cr PA in 2025. This reflects growing interest from global firms."
+   BAD: "The institute boasts an impressively high package, reinforcing its strong academic reputation."
+6. OPENING: The very first <p> must state the single most important fact from the data directly. No background re-introduction.
+7. If NOT the first section, jump straight into the topic — no re-introduction of the institution.
+8. Use ALL significant facts from the verified data. Do not leave data unused. Stop only after all data is used AND you have written at least 3 paragraphs.
+9. No <html>, <head>, <body> tags. Raw section HTML only.
+
+Write the HTML now:
+"""
+
 
 def run(
     outline: ArticleOutline,
     verified_subtopics: list[VerifiedSubTopic],
     run_dir: Path,
-    writing_style: str = "comprehensive",
 ) -> list[WrittenSection]:
     """
     Run Stage 8. Returns list[WrittenSection].
@@ -55,75 +100,80 @@ def run(
     # Build lookup: sub_topic_id → VerifiedSubTopic
     vst_map: dict[str, VerifiedSubTopic] = {v.sub_topic_id: v for v in verified_subtopics}
 
-    # Pre-compute already_covered for each section from outline headings
-    # (topic-level anti-repetition — safe to pre-compute since we know the full outline)
-    # Section 0 (first) gets "None — this is the first section." for the article intro trigger
-    def _already_covered_for(i: int) -> str:
-        if i == 0:
-            return "None — this is the first section."
-        return "\n".join(
-            f"Section {j+1}: {outline.sections[j].heading} — covered: " + ", ".join(outline.sections[j].sub_topic_ids)
-            for j in range(i)
-        )
+    client = QwenClient()
+    written: list[WrittenSection] = []
+    already_covered: list[str] = []
 
-    _write_lock = _threading.Lock()
-
-    def _write_section(args) -> tuple[int, WrittenSection | None]:
-        i, section = args
+    for i, section in enumerate(outline.sections):
         slug = _heading_slug(section.heading)
         checkpoint = sections_dir / f"{i:02d}_{slug}.html"
 
         if checkpoint.exists():
             log.info(f"  Stage 8 [{i+1}]: loading from checkpoint: {section.heading[:50]}")
             html = checkpoint.read_text(encoding="utf-8")
-            return i, WrittenSection(heading=section.heading, level=section.level,
-                                     html=html, word_count=_word_count(html))
+            wc = _word_count(html)
+            ws = WrittenSection(
+                heading=section.heading,
+                level=section.level,
+                html=html,
+                word_count=wc,
+            )
+            written.append(ws)
+            already_covered.append(f"Section {i+1}: {section.heading}")
+            continue
 
+        # Build verified data block for this section
         data_block = _build_data_block(section, vst_map)
+
         if not data_block.strip() or data_block == "No verified data available.":
-            log.warning(f"  Stage 8 [{i+1}]: NO verified data — DROPPING: {section.heading}")
-            return i, None
+            log.warning(f"  Stage 8 [{i+1}]: NO verified data — DROPPING section: {section.heading}")
+            continue
 
         log.info(f"  Stage 8 [{i+1}]: writing: {section.heading[:60]}")
-        temp = 0.3 if section.section_type == "table" else 0.45
-        already_covered_str = _already_covered_for(i)
 
-        style = writing_style
-        sys_prompt = WRITER_SYSTEMS.get(style, WRITER_SYSTEMS["comprehensive"])
-        fmt_rules = FORMAT_RULES.get(style, FORMAT_RULES["comprehensive"])
-        fmt_rules_formatted = fmt_rules.format(heading=section.heading)
-        prompt = (
-            "Write the HTML for ONE article section using ONLY the verified data below.\n\n"
-            f"Section heading: {section.heading}\n"
-            f"Minimum word count: {section.word_target} words\n"
-            f"Section type: {section.section_type}\n"
-            f"Outline instruction: {section.format_hint or section.section_type}\n\n"
-            "VERIFIED DATA (use ONLY this):\n" + data_block.replace("{", "{{").replace("}", "}}") + "\n\n"
-            "ALREADY COVERED in earlier sections (do NOT repeat):\n" + already_covered_str.replace("{", "{{").replace("}", "}}") + "\n\n"
-            f'Focus keyword (use 1-2 times naturally): "{outline.focus_keyword}"\n\n'
-            + fmt_rules_formatted + "\n\nWrite the HTML now:\n"
+        # Temperature: lower for table-heavy, higher for prose
+        temp = 0.3 if section.section_type == "table" else 0.45
+
+        prompt = WRITER_PROMPT.format(
+            heading=section.heading,
+            word_target=section.word_target,
+            section_type=section.section_type,
+            format_hint=section.format_hint or section.section_type,
+            focus_keyword=outline.focus_keyword,
+            verified_data_block=data_block.replace("{", "{{").replace("}", "}}"),
+            already_covered=("\n".join(already_covered) if already_covered else "None — this is the first section.").replace("{", "{{").replace("}", "}}"),
         )
 
-        client = QwenClient()  # each thread gets own client; HF key rotation is instance-level
-        html = client.generate(system=sys_prompt, user=prompt, temperature=temp, max_tokens=8000)
+        html = client.generate(
+            system=WRITER_SYSTEM,
+            user=prompt,
+            temperature=temp,
+            max_tokens=8000,
+        )
+
+        # Clean up common Qwen/LLM output artifacts
         html = _clean_html(html, section.heading, section.level)
+
+        # Ensure heading tag is present
         if not html.strip().startswith("<h"):
             tag = f"h{section.level}"
             html = f"<{tag}>{section.heading}</{tag}>\n{html}"
 
-        with _write_lock:
-            checkpoint.write_text(html, encoding="utf-8")
+        # Save checkpoint
+        checkpoint.write_text(html, encoding="utf-8")
 
         wc = _word_count(html)
         log.info(f"  Stage 8 [{i+1}]: written {wc} words")
-        return i, WrittenSection(heading=section.heading, level=section.level, html=html, word_count=wc)
 
-    # Parallel: 2 workers (2 HF tokens = 2 simultaneous Qwen calls; fallback uses Gemini key rotation)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        futures = list(pool.map(_write_section, enumerate(outline.sections)))
-
-    # Restore original section order (pool.map preserves order)
-    written = [ws for _, ws in futures if ws is not None]
+        ws = WrittenSection(
+            heading=section.heading,
+            level=section.level,
+            html=html,
+            word_count=wc,
+        )
+        written.append(ws)
+        already_covered.append(f"Section {i+1}: {section.heading} — covered: "
+                                + ", ".join(section.sub_topic_ids))
 
     total_words = sum(s.word_count for s in written)
     log.info(f"Stage 8: {len(written)} sections written, {total_words} total words")
