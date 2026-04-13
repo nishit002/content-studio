@@ -33,6 +33,8 @@ import json
 import logging
 import re
 from pathlib import Path
+import concurrent.futures
+import threading as _threading
 
 from llm_client import GeminiClient
 from models import (
@@ -298,17 +300,15 @@ def run(
         all_snippets = json.loads(snippets_file.read_text(encoding="utf-8"))
     entity_snippets = all_snippets.get("_entity", "")
 
-    client  = GeminiClient()
-    results: list[VerifiedSubTopic] = []
+    _ckpt_lock = _threading.Lock()
 
-    for st in blueprint.sub_topics:
+    def _index_one(st) -> VerifiedSubTopic:
         st_ckpt = extracted_dir / f"{st.id}.json"
 
         # Per sub-topic checkpoint
         if st_ckpt.exists():
             log.info("  Indexer [%s]: loading from checkpoint", st.id)
-            results.append(_deserialise(json.loads(st_ckpt.read_text(encoding="utf-8"))))
-            continue
+            return _deserialise(json.loads(st_ckpt.read_text(encoding="utf-8")))
 
         log.info("  Indexer [%s]: extracting — %s", st.id, st.name[:50])
 
@@ -330,9 +330,9 @@ def run(
                 verified_tables=[],
                 has_data=False,
             )
-            st_ckpt.write_text(json.dumps(_serialise(vst), ensure_ascii=False, indent=2), encoding="utf-8")
-            results.append(vst)
-            continue
+            with _ckpt_lock:
+                st_ckpt.write_text(json.dumps(_serialise(vst), ensure_ascii=False, indent=2), encoding="utf-8")
+            return vst
 
         prompt = EXTRACT_PROMPT.format(
             topic=blueprint.topic,
@@ -341,6 +341,7 @@ def run(
             source_text=source_text,
         )
 
+        client = GeminiClient()
         try:
             result = client.generate_json(prompt, temperature=0.0, max_tokens=8192)
         except Exception as e:
@@ -354,14 +355,29 @@ def run(
 
         vst = _parse_response(result, st.id, st.name, st_urls)
 
-        # Save per-sub-topic checkpoint
-        st_ckpt.write_text(json.dumps(_serialise(vst), ensure_ascii=False, indent=2), encoding="utf-8")
+        # Save per-sub-topic checkpoint (lock to avoid concurrent writes)
+        with _ckpt_lock:
+            st_ckpt.write_text(json.dumps(_serialise(vst), ensure_ascii=False, indent=2), encoding="utf-8")
 
         n_facts  = len(vst.verified_facts)
         n_tables = len(vst.verified_tables)
         log.info("  Indexer [%s]: %d facts, %d tables, has_data=%s",
                  st.id, n_facts, n_tables, vst.has_data)
-        results.append(vst)
+        return vst
+
+    # Run all sub-topics in parallel (max 3 workers = one per Gemini key)
+    id_to_result: dict[str, VerifiedSubTopic] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {pool.submit(_index_one, st): st.id for st in blueprint.sub_topics}
+        for fut in concurrent.futures.as_completed(futures):
+            st_id = futures[fut]
+            try:
+                id_to_result[st_id] = fut.result()
+            except Exception as e:
+                log.error("  Indexer [%s]: worker crashed: %s", st_id, e)
+
+    # Preserve original sub-topic order
+    results = [id_to_result[st.id] for st in blueprint.sub_topics if st.id in id_to_result]
 
     # Save verified_data.json (Stage 6 format — stage 7 reads this)
     verified_ckpt.write_text(
