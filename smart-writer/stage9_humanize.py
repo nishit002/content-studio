@@ -127,11 +127,22 @@ def run(
         prompt = HUMANIZE_PROMPT.format(ai_phrases=ai_phrases_str, html=section.html)
         client = QwenClient()  # each thread gets own client + own HF key rotation
         try:
-            new_html = client.generate(system=HUMANIZE_SYSTEM, user=prompt, temperature=0.75, max_tokens=3000)
+            new_html = client.generate(system=HUMANIZE_SYSTEM, user=prompt, temperature=0.75, max_tokens=6000)
         except Exception as e:
             log.warning(f"  Stage 9 [{i+1}]: humanization failed ({e}) — keeping original")
             section.humanized = True
             return section
+        # Remove duplicate headings Qwen may re-introduce (e.g. adds H2 before rewriting intro)
+        def _dedup_h(html_str, level):
+            tag = f"h{level}"
+            first_kept = [False]
+            def _keep_first(m):
+                if not first_kept[0]:
+                    first_kept[0] = True
+                    return m.group(0)
+                return ""
+            return re.sub(rf"<{tag}[^>]*>.*?</{tag}>", _keep_first, html_str, flags=re.DOTALL | re.IGNORECASE)
+        new_html = _dedup_h(new_html, section.level)
         heading_text = re.sub(r"<[^>]+>", "", section.html.split("\n")[0])[:30]
         if heading_text and heading_text.lower() not in new_html.lower():
             log.warning(f"  Stage 9 [{i+1}]: lost heading — keeping original")
