@@ -86,9 +86,12 @@ If you have a strong verified stat (NIRF rank, avg package, founded year), inclu
 1. Only include sections where verified data EXISTS in the list above.
    If a sub-topic has has_data=false, DO NOT create a section for it.
 2. 3-8 sections total (not counting FAQ). Only include sections where has_data=true.
-   Word target per section: 700-900 words for prose/mixed sections; 500-700 for table-heavy sections.
-   These are MINIMUM floors — set word_target accordingly. A 400-word section is incomplete.
-   Do NOT invent sub-sections. Do NOT pad with repetition — hit the floor through analytical depth.
+   Word target per section: set word_target to reflect the number of facts in that section's verified data.
+   A section with 3 facts needs ~250 words; a section with 15 facts and 2 tables needs ~700 words.
+   Word count must reflect data coverage — never set a target that forces padding beyond verified data.
+   THIN SECTION MERGE: If two sub-topics are topically related AND together have ≤5 facts and 0 tables,
+   merge them into ONE section. A single sub-topic with ≤2 facts and 0 tables must ALWAYS merge with
+   the nearest related sub-topic. Never create a standalone section with ≤2 facts.
 3. Section headings must be concise keyword/topic phrases (5–8 words). They are navigation labels, NOT sentences.
    Use the entity short form or abbreviation (e.g. RUHS, IIM-A, BHU) not the full name unless needed for clarity.
    A heading CAN include one key fact but must NOT be a full statement or claim.
@@ -125,7 +128,7 @@ Return a JSON object:
       "section_type": "table | prose | mixed | faq",
       "sub_topic_ids": ["id1", "id2"],
       "word_target": 750,
-      "format_hint": "lead with table, then 4-6 paragraphs of analytical prose — each paragraph: fact + context + student takeaway",
+      "format_hint": "lead with a data table if tabular data exists, then ALTERNATE: <p>(1 fact + 1 implication) then <ul> or <table>, then <p>, etc. No two <p> tags consecutively. Each <p> is 2-3 sentences using only verified data.",
       "content_character_note": "what the character research implies for this section"
     }}
   ],
@@ -144,6 +147,7 @@ def run(
     verified_subtopics: list[VerifiedSubTopic],
     run_dir: Path,
     writing_style: str = "comprehensive",
+    forced_headings: list[str] | None = None,
 ) -> ArticleOutline:
     """
     Run Stage 7. Returns ArticleOutline and saves outline.json to run_dir.
@@ -188,6 +192,17 @@ def run(
         section_order=section_order,
     )
 
+    if forced_headings:
+        h_lines = chr(10).join("  - " + h for h in forced_headings)
+        prompt += (
+            chr(10) + chr(10) +
+            "PREFERRED SECTION HEADINGS (soft constraint from user pre-planning):" + chr(10) +
+            h_lines + chr(10) + chr(10) +
+            "Use these headings WHERE VERIFIED DATA SUPPORTS THEM." + chr(10) +
+            "If a preferred heading has no supporting verified data, DROP IT." + chr(10) +
+            "If verified data exists for a topic not in the preferred list, ADD a section for it." + chr(10) +
+            "Final outline must be 100% data-backed even if it diverges from the preferred list." + chr(10)
+        )
     client = GeminiClient()
     result = client.generate_json(prompt, temperature=0.2, max_tokens=16000)
 

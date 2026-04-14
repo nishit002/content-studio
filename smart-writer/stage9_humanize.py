@@ -148,6 +148,11 @@ def run(
             log.warning(f"  Stage 9 [{i+1}]: lost heading — keeping original")
             section.humanized = True
             return section
+        # Fix D: revert if humanize introduced structural violations
+        if _has_consecutive_p(new_html) and not _has_consecutive_p(section.html):
+            log.warning(f"  Stage 9 [{i+1}]: humanize introduced consecutive <p> — reverting to pre-humanize")
+            section.humanized = True
+            return section
         with _write_lock:
             section_file.write_text(new_html, encoding="utf-8")
         section.html = new_html
@@ -157,8 +162,18 @@ def run(
         return section
 
     # Parallel humanization: 2 workers (2 HF tokens)
+    # Use submit() so a single section failure doesn't crash the whole stage.
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        humanized = list(pool.map(_humanize_one, enumerate(sections)))
+        fut_map = {pool.submit(_humanize_one, item): item[0] for item in enumerate(sections)}
+        results: dict[int, object] = {}
+        for fut in concurrent.futures.as_completed(fut_map):
+            idx = fut_map[fut]
+            try:
+                results[idx] = fut.result()  # _humanize_one returns section directly
+            except Exception as e:
+                log.error(f"  Stage 9 section {idx+1} failed humanization: {e} — keeping original")
+                results[idx] = sections[idx]  # keep original written section
+    humanized = [results[i] for i in sorted(results)]
 
     log.info(f"Stage 9: humanized {sum(1 for s in humanized if s.humanized)}/{len(sections)} sections")
 
@@ -256,3 +271,19 @@ def _extract_prose(html: str) -> str:
 def _word_count(html: str) -> int:
     text = re.sub(r"<[^>]+>", " ", html)
     return len(text.split())
+
+def _has_consecutive_p(html: str) -> bool:
+    """Return True if two <p> tags appear consecutively at top-level (no block between them)."""
+    depth = {"table": 0, "ul": 0, "ol": 0}
+    last_top = None
+    import re as _re
+    for m in _re.finditer(r"<(/?)(\w+)([^>]*)>", html):
+        closing, tag = m.group(1), m.group(2).lower()
+        if tag in depth:
+            depth[tag] += -1 if closing else 1
+        in_block = any(v > 0 for v in depth.values())
+        if not closing and not in_block and tag in ("p", "table", "ul", "ol"):
+            if last_top == "p" and tag == "p":
+                return True
+            last_top = tag
+    return False

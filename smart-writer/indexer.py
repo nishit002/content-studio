@@ -67,6 +67,11 @@ YOUR TASK:
 4. Do NOT paraphrase. "approximately 24 LPA" does NOT verify "24.2 LPA".
 5. Extract ALL rows from any table you find — do not summarise tables.
 6. If a field is not in the source text, set value to null (not an empty string).
+7. RELEVANCE RULE: Only extract tables DIRECTLY relevant to sub-topic "{sub_topic_name}".
+   A table is relevant if its title or column names share a keyword with the sub-topic name
+   or directly answer the data_fields_needed list.
+   If a table is about a clearly different topic (e.g. extracting for "eligibility" but table
+   is about "Organising IITs" or "Test Takers Trend"), DO NOT include it in extracted_tables.
 
 SANITY CHECKS — violating any of these means do NOT extract the value:
 - CUET UG scores: maximum possible = 250 (50 questions × 5 marks). Any cutoff > 250 is impossible.
@@ -173,6 +178,63 @@ def _build_source_text(
 
 
 # ── Response parser ───────────────────────────────────────────────────────────
+# ── Subtopic keyword map for table relevance filtering (Fix G) ────────────────
+
+_SUBTOPIC_KEYWORDS: dict[str, list[str]] = {
+    "eligibility":      ["eligib", "criteria", "requirement", "qualify", "attempt", "age", "qualification"],
+    "fees":             ["fee", "tuition", "cost", "scholarship", "hostel", "stipend", "expense"],
+    "placement":        ["placement", "package", "salary", "recruiter", "lpa", "ctc", "offer"],
+    "syllabus":         ["syllab", "topic", "chapter", "unit", "subject", "curriculum"],
+    "exam_pattern":     ["pattern", "marking", "section", "question", "duration", "mode", "paper"],
+    "important_dates":  ["date", "schedule", "deadline", "window", "notification", "result", "calendar"],
+    "cutoff":           ["cutoff", "cut-off", "rank", "percentile", "score", "merit"],
+    "admission":        ["admission", "apply", "application", "selection", "counselling", "process"],
+    "courses":          ["course", "programme", "branch", "stream", "specialisation", "degree"],
+    "ranking":          ["rank", "nirf", "rating", "position", "accreditation", "naac", "nba"],
+}
+
+
+def _filter_tables_by_relevance(
+    tables: list[dict], sub_topic_name: str
+) -> list[dict]:
+    """
+    Drop tables that are clearly irrelevant to the sub-topic.
+    Uses keyword matching on title + column names.
+    Falls back to keeping all tables if no keyword list is known for this sub-topic.
+    """
+    # Find keyword list for this sub-topic
+    st_lower = sub_topic_name.lower().replace("-", " ").replace("_", " ")
+    kws: list[str] = []
+    for key, words in _SUBTOPIC_KEYWORDS.items():
+        if key in st_lower or any(w in st_lower for w in words):
+            kws = words
+            break
+
+    if not kws:
+        # Unknown sub-topic — keep all tables (safe default)
+        return tables
+
+    kept = []
+    for tbl in tables:
+        title  = (tbl.get("title") or "").lower()
+        cols   = " ".join(str(c) for c in tbl.get("columns", [])).lower()
+        combined = title + " " + cols
+        if any(kw in combined for kw in kws):
+            kept.append(tbl)
+        else:
+            # Also keep if title contains any word from the sub-topic name itself
+            st_words = [w for w in st_lower.split() if len(w) > 3]
+            if any(w in combined for w in st_words):
+                kept.append(tbl)
+            else:
+                log.info(
+                    "  indexer table_filter: dropped irrelevant table '%s' for sub-topic '%s'",
+                    tbl.get("title", "?")[:60], sub_topic_name[:40]
+                )
+    return kept
+
+
+
 
 def _parse_response(
     result:        dict,
@@ -209,6 +271,9 @@ def _parse_response(
                 "columns": cols,
                 "rows":    rows[:50],  # cap at 50 rows per table
             })
+
+    # Fix G: filter out tables irrelevant to this sub-topic
+    verified_tables = _filter_tables_by_relevance(verified_tables, sub_topic_name)
 
     has_data = bool(verified_facts or verified_tables)
     return VerifiedSubTopic(
@@ -378,6 +443,22 @@ def run(
 
     # Preserve original sub-topic order
     results = [id_to_result[st.id] for st in blueprint.sub_topics if st.id in id_to_result]
+
+    # Fix C: Cross-subtopic dedup — remove fact values that already appeared in an
+    # earlier sub-topic so stage 8 doesn't write the same number in two sections.
+    seen_values: set[str] = set()
+    for vst in results:
+        deduped: list = []
+        for fact in vst.verified_facts:
+            key = str(fact.value).strip()[:200]
+            if key in seen_values:
+                log.debug("  indexer dedup: dropped duplicate '%s' from '%s'", fact.field[:40], vst.sub_topic_name[:40])
+            else:
+                seen_values.add(key)
+                deduped.append(fact)
+        vst.verified_facts = deduped
+        if not vst.verified_facts and not vst.verified_tables:
+            vst.has_data = False
 
     # Save verified_data.json (Stage 6 format — stage 7 reads this)
     verified_ckpt.write_text(
