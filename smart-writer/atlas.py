@@ -511,17 +511,38 @@ Examples:
 
     if args.fanout:
         import section_pipeline
-        from pathlib import Path
-        import tempfile
-        _sp_dir = Path(tempfile.mkdtemp(prefix="sp_"))
-        print(f"[fanout] output -> {_sp_dir}")
-        _html = section_pipeline.run(
-            topic=args.topic,
-            entity_type=args.type,
-            run_dir=_sp_dir,
-            focus_keyword=args.topic,
-        )
-        print(f"[fanout] done — {len(_html)} chars — {_sp_dir}/article.html")
+        from datetime import datetime
+        # Use same output dir structure as normal atlas runs so worker can find it
+        _runs = _load_runs()
+        _run_id = _next_run_id(_runs)
+        _sp_dir = OUTPUT_DIR / f"{_run_id}-{_slug(args.topic)}"
+        _sp_dir.mkdir(parents=True, exist_ok=True)
+        _update_run(_run_id,
+                    id=_run_id,
+                    topic=args.topic,
+                    status="running",
+                    started=datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    run_dir=str(_sp_dir),
+                    pipeline="fanout")
+        print(f"[fanout] Run {_run_id} → {_sp_dir}")
+        try:
+            _html = section_pipeline.run(
+                topic=args.topic,
+                entity_type=args.type,
+                run_dir=_sp_dir,
+                focus_keyword=args.topic,
+            )
+            _wc = len(_html.split()) - 50
+            _update_run(_run_id,
+                        status="done",
+                        finished=datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        word_count=_wc,
+                        article_path=str(_sp_dir / "article.html"))
+            print(f"[fanout] done — {_wc} words — {_sp_dir}/article.html")
+        except Exception as _e:
+            _update_run(_run_id, status="failed", error=str(_e))
+            print(f"[fanout] FAILED: {_e}")
+            raise
         return
     run_pipeline(
         topic=args.topic,

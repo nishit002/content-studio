@@ -101,12 +101,12 @@ def _generate_section_queries(
     sections_data = [{"heading": s.heading, "seo_intent": s.seo_intent} for s in sections]
     client = GeminiClient()
     try:
+        prompt = (_QUERY_GEN_PROMPT
+                   .replace("{topic}", topic)
+                   .replace("{entity_type}", entity_type)
+                   .replace("{sections_json}", json.dumps(sections_data, indent=2)))
         result = client.generate_json(
-            _QUERY_GEN_PROMPT.format(
-                topic=topic,
-                entity_type=entity_type,
-                sections_json=json.dumps(sections_data, indent=2),
-            ),
+            prompt,
             temperature=0.2,
             max_tokens=2048,
         )
@@ -123,7 +123,7 @@ def _generate_section_queries(
         return out
     except Exception as e:
         log.warning("Query generation failed: %s — using fallback", e)
-        return {s.heading: [f"{topic} {s.heading}"] for s in sections}
+        return {s.heading: [f"{topic}: {s.heading}", s.heading] for s in sections}
 
 
 # ── Page fetching ─────────────────────────────────────────────────────────────
@@ -145,7 +145,7 @@ def _fetch_pages_for_section(
     Fetch top pages for a section. Returns (combined_text, snippets_text).
     Reddit/Quora skipped for page fetching (used only for question signals).
     """
-    from researcher import _fetch_url  # reuse existing fetch logic
+    from researcher import _fetch_url
 
     pages_dir.mkdir(parents=True, exist_ok=True)
 
@@ -266,14 +266,15 @@ def _extract_section_data(
 
     client = GeminiClient()
     try:
+        # Use explicit replace instead of .format() to avoid mangling JSON braces in template
+        prompt = (_EXTRACT_PROMPT
+                  .replace("{topic}", topic)
+                  .replace("{heading}", section.heading)
+                  .replace("{seo_intent}", section.seo_intent)
+                  .replace("{what_to_answer}", what)
+                  .replace("{source_text}", full_source[:28000]))
         return client.generate_json(
-            _EXTRACT_PROMPT.format(
-                topic=topic,
-                heading=section.heading,
-                seo_intent=section.seo_intent,
-                what_to_answer=what,
-                source_text=full_source[:28000],
-            ),
+            prompt,
             temperature=0.0,
             max_tokens=8192,
         )
@@ -286,19 +287,19 @@ def _extract_section_data(
 
 _WRITE_PROMPT = """\
 Write HTML for ONE article section using ONLY the verified data below.
-Section heading: {heading}
+Section heading (DO NOT include this in your output — it will be added automatically): {heading}
 Data shape: {data_shape}
 Focus keyword (use 1-2 times): {focus_keyword}
 
 VERIFIED DATA:
 {data_block}
 
-FORMAT based on data_shape:
-  table-dominant → <h2> then <table class="data-table"> (ALL rows, proper <thead>/<tbody>),
+FORMAT based on data_shape — start DIRECTLY with content (NO <h2> tag):
+  table-dominant → <table class="data-table"> (ALL rows, proper <thead>/<tbody>),
                    then ONE <p> with key takeaway. Never two <p> in a row.
-  list-dominant  → <h2> then <p> (single most important fact, 1-2 sentences),
+  list-dominant  → <p> (single most important fact, 1-2 sentences),
                    then <ul> with all key facts as <li><strong>field:</strong> value</li>
-  prose-dominant → <h2> then ALTERNATING: <p> (2-3 sentences, 1 data point)
+  prose-dominant → ALTERNATING: <p> (2-3 sentences, 1 data point)
                    then <ul> or <table> then <p> — NEVER two consecutive <p>
 
 HARD RULES:
@@ -306,9 +307,9 @@ HARD RULES:
 2. NEVER two consecutive <p> tags.
 3. All numbers must match source exactly.
 4. Tables need <thead><tr><th> headers + <tbody><tr><td> rows.
-5. No <html>/<body>/<head>. Raw section HTML only.
+5. No <html>/<body>/<head>/<h2>. Raw content HTML only — heading is prepended automatically.
 
-Write the HTML now:"""
+Write the content HTML now (no heading):"""
 
 
 def _build_data_block(extracted: dict) -> str:
@@ -340,7 +341,7 @@ def _build_data_block(extracted: dict) -> str:
 
 
 def _write_section(section, extracted: dict, focus_keyword: str) -> str:
-    """Write one section's HTML. Uses Gemini (focused + fast for short sections)."""
+    """Write one section's HTML. Heading is always prepended from outline — LLM writes content only."""
     data_block = _build_data_block(extracted)
     if not data_block:
         log.info("  Section '%s': no data — skipping", section.heading[:50])
@@ -361,66 +362,213 @@ def _write_section(section, extracted: dict, focus_keyword: str) -> str:
         )
         html = re.sub(r"^```[a-zA-Z]*\s*\n", "", html.strip())
         html = re.sub(r"\n```\s*$", "", html).strip()
-        if not re.match(r"<h[2-6]", html, re.IGNORECASE):
-            html = f"<h2>{section.heading}</h2>\n{html}"
-        return html
+        # Strip any h2/h3 the LLM added at the top (heading comes from outline, not LLM)
+        html = re.sub(r"^\s*<h[2-6][^>]*>.*?</h[2-6]>\s*", "", html, count=1, flags=re.DOTALL | re.IGNORECASE)
+        html = html.strip()
+        # Always prepend the definitive section heading from the outline
+        return f"<h2>{section.heading}</h2>\n{html}"
     except Exception as e:
         log.warning("Write failed '%s': %s", section.heading[:50], e)
         return f"<h2>{section.heading}</h2>\n<p>Content coming soon.</p>"
 
 
-# ── FAQ ───────────────────────────────────────────────────────────────────────
+# ── FAQ Module (supplementary — intent-driven + researched answers) ───────────
 
-_FAQ_PROMPT = """\
-Write a FAQ section for an article about: {topic}
+_FAQ_QGEN_PROMPT = """\
+Generate FAQ questions for an article about: TOPIC_PLACEHOLDER
 
-User questions collected during research (real questions from Reddit/Quora + common queries):
-{questions}
+Questions already found from Reddit/Quora research:
+EXISTING_PLACEHOLDER
 
-FORMAT:
-<h2>Frequently Asked Questions</h2>
-<div class="faq-item">
-  <h3>Question text?</h3>
-  <p>Direct answer in 2-3 sentences. Specific. No invented data.</p>
-</div>
-(repeat for each question)
+Generate 6-8 FAQ questions that real students or users actually ask about "TOPIC_PLACEHOLDER".
+Cover these intent types (at least one each):
+- what/definition: basic "what is" questions
+- how-to: process or steps
+- eligibility/requirement: who can, minimum marks, age limit
+- comparison: vs, difference, better than
+- outcome: after exam, career scope, next steps
+- dates/schedule: when, registration, result timeline
 
-RULES:
-- Answer directly and specifically. If uncertain, say "Check the official website."
-- Add up to 4 common questions about {topic} if the collected list is short.
-- 6-8 total questions minimum.
-- No invented statistics or cutoffs.
-Write the FAQ HTML now:"""
+Include the already-found questions above (deduplicated), then add more to reach 6-8 total.
+
+Return ONLY valid JSON:
+{"questions": ["Question 1?", "Question 2?"]}
+
+Rules:
+- Each question 8-15 words, must end with ?
+- Specific to TOPIC_PLACEHOLDER — no generic questions
+- No duplicate intent
+"""
+
+_FAQ_ANSWER_PROMPT = """\
+Answer this FAQ question about TOPIC_PLACEHOLDER concisely.
+
+Question: QUESTION_PLACEHOLDER
+
+Research snippets (use as factual basis — do not invent data not present here):
+SNIPPETS_PLACEHOLDER
+
+Write a direct 2-4 sentence answer. Be specific. Use numbers/facts from snippets where available.
+If the research lacks a specific answer, give a helpful general answer and recommend the official source.
+Do NOT use bullet points. Plain prose only.
+Do NOT start with "Based on the research" or "According to snippets".
+"""
 
 
-def _write_faq(topic: str, questions: list[str]) -> str:
-    """Write FAQ section from collected user questions."""
-    seen: set[str] = set()
-    unique = []
-    for q in questions:
-        key = q.lower().strip("? ")
-        if key not in seen:
-            seen.add(key)
-            unique.append(q)
+def _generate_faq_questions(topic: str, existing: list[str]) -> list[str]:
+    """Use Gemini to generate 6-8 intent-driven FAQ questions."""
+    client = GeminiClient()
+    prompt = (_FAQ_QGEN_PROMPT
+              .replace("TOPIC_PLACEHOLDER", topic)
+              .replace("EXISTING_PLACEHOLDER",
+                       "\n".join(f"- {q}" for q in existing) if existing else "None collected yet."))
+    try:
+        result = client.generate_json(prompt, temperature=0.3, max_tokens=800)
+        if isinstance(result, dict) and "questions" in result:
+            qs = [q.strip() for q in result["questions"] if isinstance(q, str) and len(q.strip()) > 10]
+            return qs[:8]
+    except Exception as e:
+        log.warning("FAQ question generation failed: %s", e)
+    base = list(existing[:4])
+    if not any("what" in q.lower() for q in base):
+        base.insert(0, f"What is {topic}?")
+    return base
 
-    if not unique:
-        unique = [f"What is {topic}?"]
 
+def _research_faq_questions(topic: str, questions: list[str]) -> dict[str, str]:
+    """Run one You.com search per FAQ question, return question -> snippets text."""
+    from researcher import _YouClient
+    try:
+        researcher = _YouClient()
+        results = asyncio.run(researcher.batch_search(questions))
+    except Exception as e:
+        log.warning("FAQ research failed: %s", e)
+        return {}
+
+    out: dict[str, str] = {}
+    for q, hits in results.items():
+        snippets = []
+        for r in hits[:5]:
+            desc = r.get("description", "").strip()
+            if desc and len(desc) > 30:
+                snippets.append(desc)
+            for s in r.get("snippets", [])[:2]:
+                if s and len(s.strip()) > 30:
+                    snippets.append(s.strip())
+        out[q] = " ".join(snippets[:4])[:1800]
+    return out
+
+
+def _write_faq(topic: str, collected_questions: list[str]) -> str:
+    """
+    Supplementary FAQ module:
+    1. Generate intent-driven questions from topic + collected signals
+    2. Research each question with targeted You.com search
+    3. Write each answer from researched snippets (no hallucination)
+    4. Assemble HTML + FAQPage schema
+    """
+    questions = _generate_faq_questions(topic, collected_questions)
+    log.info("[faq] %d questions to research+answer", len(questions))
+
+    snippets_map = _research_faq_questions(topic, questions)
+
+    gemini = GeminiClient()
+
+    def _answer_one(q: str) -> tuple[str, str]:
+        snippets = snippets_map.get(q, "")
+        prompt = (_FAQ_ANSWER_PROMPT
+                  .replace("TOPIC_PLACEHOLDER", topic)
+                  .replace("QUESTION_PLACEHOLDER", q)
+                  .replace("SNIPPETS_PLACEHOLDER", snippets or "No specific snippets available."))
+        try:
+            ans = gemini.generate(prompt, temperature=0.2, max_tokens=2000)
+            return q, ans.strip()
+        except Exception as e:
+            log.warning("FAQ answer failed for '%s': %s", q[:40], e)
+            return q, f"Please refer to the official website for the latest information on {topic}."
+
+    q_to_ans: dict[str, str] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        futs = {pool.submit(_answer_one, q): q for q in questions}
+        for fut in concurrent.futures.as_completed(futs):
+            try:
+                q, ans = fut.result()
+                q_to_ans[q] = ans
+            except Exception:
+                pass
+
+    answered = [(q, q_to_ans[q]) for q in questions if q in q_to_ans]
+
+    parts = ['<section class="faq-section">', '<h2>Frequently Asked Questions</h2>']
+    schema_entities = []
+    for q, ans in answered:
+        clean_ans = re.sub(r"<[^>]+>", "", ans).strip()
+        parts.append(
+            f'<div class="faq-item">\n'
+            f'  <h3 class="faq-question">{q}</h3>\n'
+            f'  <div class="faq-answer"><p>{clean_ans}</p></div>\n'
+            f'</div>'
+        )
+        schema_entities.append({
+            "@type": "Question",
+            "name": q,
+            "acceptedAnswer": {"@type": "Answer", "text": clean_ans}
+        })
+    parts.append('</section>')
+    schema = {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": schema_entities,
+    }
+    parts.append(
+        f'<script type="application/ld+json">\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n</script>'
+    )
+    return "\n".join(parts)
+
+
+# ── Intro paragraph (inverted pyramid) ───────────────────────────────────────
+
+_INTRO_PROMPT = """\
+Write an opening paragraph for an article about: TOPIC_PLACEHOLDER
+
+Article title (H1): H1_PLACEHOLDER
+
+This article covers these sections:
+SECTIONS_PLACEHOLDER
+
+Rules for the opening paragraph (inverted pyramid style):
+- Lead with the MOST IMPORTANT fact or direct answer — not "In this article..."
+- 2-4 sentences, 60-90 words total
+- Weave in the focus keyword "KEYWORD_PLACEHOLDER" naturally in the first sentence
+- Final sentence previews what the reader will find in this article (briefly)
+- Conversational but authoritative — written for a student searching for this
+- No generic openers: "Are you looking for...", "This comprehensive guide...", "Welcome to..."
+
+Write ONLY the <p> tag:"""
+
+
+def _write_intro(topic: str, h1: str, section_headings: list[str], focus_keyword: str) -> str:
+    """Generate an inverted-pyramid SEO opening paragraph after sections are planned."""
+    sections_list = "\n".join(f"- {h}" for h in section_headings)
+    prompt = (_INTRO_PROMPT
+              .replace("TOPIC_PLACEHOLDER", topic)
+              .replace("H1_PLACEHOLDER", h1)
+              .replace("SECTIONS_PLACEHOLDER", sections_list)
+              .replace("KEYWORD_PLACEHOLDER", focus_keyword))
     client = GeminiClient()
     try:
-        html = client.generate(
-            _FAQ_PROMPT.format(
-                topic=topic,
-                questions="\n".join(f"- {q}" for q in unique[:12]),
-            ),
-            temperature=0.3,
-            max_tokens=3000,
-        )
+        html = client.generate(prompt, temperature=0.3, max_tokens=1500)
         html = re.sub(r"^```[a-zA-Z]*\s*\n", "", html.strip())
-        return re.sub(r"\n```\s*$", "", html).strip()
+        html = re.sub(r"\n```\s*$", "", html).strip()
+        if not html.startswith("<p"):
+            html = f"<p>{html}"
+        # Auto-close if Gemini truncated before </p>
+        if not html.rstrip().endswith("</p>"):
+            html = html.rstrip() + "</p>"
+        return html
     except Exception as e:
-        log.warning("FAQ write failed: %s", e)
-        return f"<h2>Frequently Asked Questions</h2>\n<p>Visit the official website for the latest information.</p>"
+        log.warning("Intro generation failed: %s", e)
+        return ""
 
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
@@ -437,7 +585,7 @@ def run(
     Returns assembled article HTML.
     """
     from fanout import generate_outline
-    from researcher import YouResearcher
+    from researcher import _YouClient
 
     if run_dir is None:
         import tempfile
@@ -469,7 +617,7 @@ def run(
 
     log.info("[section_pipeline] Searching %d queries", len(all_queries))
     try:
-        researcher = YouResearcher()
+        researcher = _YouClient()
         search_results = asyncio.run(researcher.batch_search(all_queries))
     except Exception as e:
         log.warning("[section_pipeline] Search failed: %s", e)
@@ -526,12 +674,23 @@ def run(
             written.append(html)
         all_user_questions.extend(section_questions_map.get(section.heading, []))
 
-    # ── 5. FAQ ────────────────────────────────────────────────────────────────
+    # ── 5. Intro paragraph (inverted pyramid) ────────────────────────────────
+    log.info("[section_pipeline] Writing intro paragraph")
+    intro_html = _write_intro(
+        topic, outline.h1,
+        [s.heading for s in content_sections],
+        focus_keyword,
+    )
+
+    # ── 6. FAQ ────────────────────────────────────────────────────────────────
     log.info("[section_pipeline] Writing FAQ (%d questions)", len(all_user_questions))
     written.append(_write_faq(topic, all_user_questions))
 
-    # ── 6. Assemble ───────────────────────────────────────────────────────────
-    article_html = f"<h1>{outline.h1}</h1>\n\n" + "\n\n".join(written)
+    # ── 7. Assemble ───────────────────────────────────────────────────────────
+    header = f"<h1>{outline.h1}</h1>"
+    if intro_html:
+        header += f"\n{intro_html}"
+    article_html = header + "\n\n" + "\n\n".join(written)
 
     out_path = run_dir / "article.html"
     out_path.write_text(article_html, encoding="utf-8")
