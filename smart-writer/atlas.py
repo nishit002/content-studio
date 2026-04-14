@@ -177,6 +177,7 @@ def run_pipeline(
     use_cg_research: bool = False,
     use_you_research: bool = False,
     writing_style: str = "comprehensive",
+    forced_headings: list[str] | None = None,
 ) -> None:
     """
     Run the full ATLAS pipeline for a topic.
@@ -199,6 +200,7 @@ def run_pipeline(
     import stage9_humanize
     import stage10_coherence
     import stage11_proofread
+    import stage12_structure
     if use_cg_research:
         import stage_research_bridge
     if use_you_research:
@@ -319,7 +321,7 @@ def run_pipeline(
 
         # ── Stage 7: Outline ──────────────────────────────────────────────────
         _log_stage(7, "Article Outline")
-        outline = stage7_outline.run(blueprint, character, verified, run_dir)
+        outline = stage7_outline.run(blueprint, character, verified, run_dir, writing_style=writing_style, forced_headings=forced_headings)
 
         # ── Stage 8: Section Writing ──────────────────────────────────────────
         _log_stage(8, "Section Writing")
@@ -345,6 +347,27 @@ def run_pipeline(
             final_html = stage11_proofread.run(run_dir)
         except Exception as e:
             log.warning("Stage 11 failed (%s) — continuing with unproofread article", e)
+
+        # ── Stage 11.5: HTML structural fixer ────────────────────────────────
+        _log_stage("11.5", "HTML Structural Fix")
+        try:
+            import fix_html as _fix_html
+            from pathlib import Path as _Path
+            _article_path = _Path(run_dir) / "article.html"
+            if _article_path.exists():
+                _, _fixes = _fix_html.fix_article_file(_article_path)
+                if _fixes:
+                    log.info("HTML fixer: %d fix(es) applied — %s", len(_fixes), "; ".join(_fixes[:3]))
+                    final_html = _article_path.read_text(encoding="utf-8")
+        except Exception as e:
+            log.warning("HTML fixer failed (%s) — continuing", e)
+
+        # ── Stage 12: Structural Enforcer ────────────────────────────────────
+        _log_stage(12, "Structural Enforcer — Alternation Fix")
+        try:
+            final_html = stage12_structure.run(run_dir) or final_html
+        except Exception as e:
+            log.warning("Stage 12 failed (%s) — continuing with unstructured article", e)
 
         # ── Done ──────────────────────────────────────────────────────────────
         word_count = len(final_html.split()) - 200  # rough subtract HTML boilerplate
@@ -452,12 +475,23 @@ Examples:
         help="Writing style: comprehensive (default), data_reference (max tables/bullets), student_guide (decision-focused)",
     )
     parser.add_argument(
+        "--forced-headings",
+        default=None,
+        help="Pipe-separated preferred H2 headings (soft constraint for stage 7). e.g. \"Exam Overview|Eligibility|Syllabus\"",
+    )
+    parser.add_argument(
         "--use-cg-research",
         action="store_true",
         help=(
             "Replace Stages 3-4-5-6 with content-generator subprocess bridge (legacy). "
             "Use --use-you-research instead."
         ),
+    )
+
+    parser.add_argument(
+        "--fanout",
+        action="store_true",
+        help="Fanout-driven section pipeline: per-section research+write, FAQ auto-generated.",
     )
 
     args = parser.parse_args()
@@ -475,6 +509,20 @@ Examples:
         print("ERROR: GEMINI_API_KEY not set. Create a .env file with your key.")
         sys.exit(1)
 
+    if args.fanout:
+        import section_pipeline
+        from pathlib import Path
+        import tempfile
+        _sp_dir = Path(tempfile.mkdtemp(prefix="sp_"))
+        print(f"[fanout] output -> {_sp_dir}")
+        _html = section_pipeline.run(
+            topic=args.topic,
+            entity_type=args.type,
+            run_dir=_sp_dir,
+            focus_keyword=args.topic,
+        )
+        print(f"[fanout] done — {len(_html)} chars — {_sp_dir}/article.html")
+        return
     run_pipeline(
         topic=args.topic,
         content_type=args.type,
@@ -483,6 +531,7 @@ Examples:
         use_cg_research=args.use_cg_research,
         use_you_research=args.use_you_research,
         writing_style=args.style,
+        forced_headings=[h.strip() for h in args.forced_headings.split("|")] if args.forced_headings else None,
     )
 
 

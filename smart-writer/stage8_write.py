@@ -279,15 +279,26 @@ def _build_skeleton(heading: str, level: int, facts: list, tables: list) -> tupl
         if table_idx < len(tables):
             tbl = tables[table_idx]
             table_idx += 1
-            slot_tn = len(slot_descs) + 1
+            tbl_rows = tbl.get("rows", [])
             col_list = " | ".join(tbl["columns"])
-            row_preview = "; ".join(" | ".join(str(c) for c in r) for r in tbl["rows"][:3])
-            slot_descs.append(
-                "SLOT_T%d: Fill <table class=\"data-table\"> ALL rows from '%s'. Columns: %s. Sample rows: %s" % (
-                    slot_tn, tbl["title"], col_list, row_preview
+            if len(tbl_rows) < 3:
+                slot_ln = len(slot_descs) + 1
+                row_items = "; ".join(" | ".join(str(c) for c in r) for r in tbl_rows)
+                slot_descs.append(
+                    "SLOT_L%d: <ul> list for '%s'. One <li><strong>label:</strong> value</li> per item. Data: %s" % (
+                        slot_ln, tbl["title"], row_items or col_list
+                    )
                 )
-            )
-            parts.append('<table class="data-table">{{SLOT_T%d}}</table>' % slot_tn)
+                parts.append("<ul>{{SLOT_L%d}}</ul>" % slot_ln)
+            else:
+                slot_tn = len(slot_descs) + 1
+                row_preview = "; ".join(" | ".join(str(c) for c in r) for r in tbl_rows[:3])
+                slot_descs.append(
+                    "SLOT_T%d: Fill <table class=\"data-table\"> ALL rows from '%s'. Columns: %s. Sample rows: %s" % (
+                        slot_tn, tbl["title"], col_list, row_preview
+                    )
+                )
+                parts.append('<table class="data-table">{{SLOT_T%d}}</table>' % slot_tn)
         elif ci + 1 < len(fact_chunks):
             # Use next chunk as a ul to break prose
             next_chunk = [(f, v) for f, v in fact_chunks[ci + 1] if (f, v) not in used_fact_set]
@@ -302,18 +313,29 @@ def _build_skeleton(heading: str, level: int, facts: list, tables: list) -> tupl
                     used_fact_set.add(fv)
         ci += 1
 
-    # Any remaining tables
+    # Any remaining tables — thin (<3 rows) become ul
     while table_idx < len(tables):
         tbl = tables[table_idx]
         table_idx += 1
-        slot_tn = len(slot_descs) + 1
+        tbl_rows = tbl.get("rows", [])
         col_list = " | ".join(tbl["columns"])
-        slot_descs.append(
-            "SLOT_T%d: Fill <table class=\"data-table\"> ALL rows from '%s'. Columns: %s." % (
-                slot_tn, tbl["title"], col_list
+        if len(tbl_rows) < 3:
+            slot_ln = len(slot_descs) + 1
+            row_items = "; ".join(" | ".join(str(c) for c in r) for r in tbl_rows)
+            slot_descs.append(
+                "SLOT_L%d: <ul> list for '%s'. One <li><strong>label:</strong> value</li> per item. Data: %s" % (
+                    slot_ln, tbl["title"], row_items or col_list
+                )
             )
-        )
-        parts.append('<table class="data-table">{{SLOT_T%d}}</table>' % slot_tn)
+            parts.append("<ul>{{SLOT_L%d}}</ul>" % slot_ln)
+        else:
+            slot_tn = len(slot_descs) + 1
+            slot_descs.append(
+                "SLOT_T%d: Fill <table class=\"data-table\"> ALL rows from '%s'. Columns: %s." % (
+                    slot_tn, tbl["title"], col_list
+                )
+            )
+            parts.append('<table class="data-table">{{SLOT_T%d}}</table>' % slot_tn)
 
     return "\n".join(parts), slot_descs
 
